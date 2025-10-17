@@ -4,6 +4,8 @@ import 'dart:async';
 import 'package:stomp_dart_client/stomp.dart';
 import 'package:stomp_dart_client/stomp_config.dart';
 import 'package:stomp_dart_client/stomp_frame.dart';
+import 'package:http/http.dart' as http;
+import 'sensor_info.dart';
 import 'settings_page.dart';
 
 void main() {
@@ -34,26 +36,18 @@ class GasMonitoringPage extends StatefulWidget {
 }
 
 class _GasMonitoringPageState extends State<GasMonitoringPage> {
-  // ---- 서버 & 센서 설정 ----
+  // ---- 서버 설정 ----
   String _serverIp = '192.168.0.224';
-  String _serverPort = '8081';
+  String _serverPort = '8080';
 
-  // 센서 #1
-  String _deviceId1 = 'UA58KFG';
-  String _sensorPort1 = 'COM3';
-
-  // 센서 #2
-  String _deviceId2 = 'UA58LEL';
-  String _sensorPort2 = 'COM4';
+  // ---- 동적 센서 관리 ----
+  List<SensorInfo> _sensors = [];
+  bool _sensorsLoaded = false;
+  String _sensorLoadError = '';
 
   // ---- UI 상태 ----
-  String _connectionStatus = '연결 대기중';
-
-  // 센서 데이터/시간
-  String _sensorData1 = '--';
-  String _sensorTime1 = '--';
-  String _sensorData2 = '--';
-  String _sensorTime2 = '--';
+  String _connectionStatus = '센서 정보 로딩중...';
+  bool _isWebSocketConnected = false;
 
   // ---- STOMP ----
   StompClient? _stomp;
@@ -64,14 +58,12 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
 
   String get _wsUrl => 'ws://$_serverIp:$_serverPort/ws/sensor';
   String get _httpSockUrl => 'http://$_serverIp:$_serverPort/ws/sensor';
-
-  String get _topic1 => '/topic/sensor/$_deviceId1/$_sensorPort1';
-  String get _topic2 => '/topic/sensor/$_deviceId2/$_sensorPort2';
+  String get _apiUrl => 'http://$_serverIp:$_serverPort/api/sensor/mappings';
 
   @override
   void initState() {
     super.initState();
-    _connectStomp();
+    _loadSensors();
   }
 
   @override
@@ -82,11 +74,75 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
     super.dispose();
   }
 
+  // ------------------ 센서 정보 로딩 ------------------
+  Future<void> _loadSensors() async {
+    setState(() {
+      _connectionStatus = '센서 정보 로딩중...';
+      _sensorsLoaded = false;
+      _sensorLoadError = '';
+    });
+
+    try {
+      debugPrint('센서 매핑 API 호출: $_apiUrl');
+      final response = await http
+          .get(
+            Uri.parse(_apiUrl),
+            headers: {'Content-Type': 'application/json'},
+          )
+          .timeout(const Duration(seconds: 10));
+
+      if (response.statusCode == 200) {
+        final Map<String, dynamic> responseData = jsonDecode(response.body);
+        debugPrint('API 응답: $responseData');
+
+        if (responseData['code'] == 200 && responseData['data'] != null) {
+          final List<dynamic> sensorsJson =
+              responseData['data']['sensors'] ?? [];
+
+          setState(() {
+            _sensors = sensorsJson
+                .map((json) => SensorInfo.fromJson(json))
+                .toList();
+            _sensorsLoaded = true;
+            _connectionStatus = '센서 ${_sensors.length}개 로딩 완료';
+          });
+
+          debugPrint('로딩된 센서들:');
+          for (var sensor in _sensors) {
+            debugPrint('  - ${sensor.displayName}: ${sensor.topicPath}');
+          }
+
+          // 센서 로딩 완료 후 WebSocket 연결 시작
+          if (_sensors.isNotEmpty) {
+            _connectStomp();
+          } else {
+            setState(() {
+              _connectionStatus = '등록된 센서가 없습니다';
+            });
+          }
+        } else {
+          throw Exception(
+            'API 응답 오류: ${responseData['message'] ?? 'Unknown error'}',
+          );
+        }
+      } else {
+        throw Exception('HTTP ${response.statusCode}: ${response.body}');
+      }
+    } catch (e) {
+      setState(() {
+        _sensorLoadError = e.toString();
+        _connectionStatus = '센서 로딩 실패: $e';
+        _sensorsLoaded = false;
+      });
+      debugPrint('센서 로딩 오류: $e');
+    }
+  }
+
   // ------------------ 연결/구독 ------------------
   void _connectStomp() {
-    if (_isConnecting) return;
+    if (_isConnecting || !_sensorsLoaded) return;
     _isConnecting = true;
-    setState(() => _connectionStatus = '연결중...');
+    setState(() => _connectionStatus = 'WebSocket 연결중...');
 
     _usingSockJS = false; // 순수 WS 우선
     _createAndActivateClient(sockJs: false);
@@ -134,30 +190,36 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
     _retryTimer?.cancel();
 
     setState(() {
-      _connectionStatus = '연결됨 (${_usingSockJS ? "SockJS" : "WS"})';
+      _isWebSocketConnected = true;
+      _connectionStatus = 'WebSocket 연결됨 (${_usingSockJS ? "SockJS" : "WS"})';
     });
 
-    // ✅ 센서 1, 2를 각각 구독
-    _stomp?.subscribe(
-      destination: _topic1,
-      headers: const {'ack': 'auto'},
-      callback: (msg) => _updateSensor(1, msg.body),
-    );
-    _stomp?.subscribe(
-      destination: _topic2,
-      headers: const {'ack': 'auto'},
-      callback: (msg) => _updateSensor(2, msg.body),
-    );
+    // ✅ 모든 센서들을 구독
+    for (int i = 0; i < _sensors.length; i++) {
+      final sensor = _sensors[i];
+      debugPrint('센서 구독: ${sensor.topicPath}');
+
+      _stomp?.subscribe(
+        destination: sensor.topicPath,
+        headers: const {'ack': 'auto'},
+        callback: (msg) => _updateSensor(i, msg.body),
+      );
+    }
 
     _heartbeatTicker?.cancel();
     _heartbeatTicker = Stream.periodic(
       const Duration(seconds: 15),
     ).listen((_) => debugPrint('[hb] alive'));
+
+    setState(() {
+      _connectionStatus = '${_sensors.length}개 센서 구독 완료';
+    });
   }
 
   void _onStompError(StompFrame frame) {
     _isConnecting = false;
     setState(() {
+      _isWebSocketConnected = false;
       _connectionStatus = 'STOMP 오류: ${frame.body ?? frame.headers.toString()}';
     });
     _scheduleRetryOrFallback();
@@ -165,7 +227,10 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
 
   void _onWsError(Object error, {required bool sockJs}) {
     debugPrint('WS error(${sockJs ? "sockjs" : "ws"}): $error');
-    setState(() => _connectionStatus = '연결 오류: $error');
+    setState(() {
+      _isWebSocketConnected = false;
+      _connectionStatus = '연결 오류: $error';
+    });
 
     if (!sockJs) {
       // 순수 WS 실패 → SockJS로 폴백
@@ -182,7 +247,10 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
 
   void _onWsDone() {
     debugPrint('WS done/closed');
-    setState(() => _connectionStatus = '연결 끊어짐');
+    setState(() {
+      _isWebSocketConnected = false;
+      _connectionStatus = '연결 끊어짐';
+    });
     _scheduleRetryOrFallback();
   }
 
@@ -195,8 +263,11 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
   }
 
   // ------------------ 메시지 처리 ------------------
-  void _updateSensor(int idx, String? body) {
+  void _updateSensor(int sensorIndex, String? body) {
+    if (sensorIndex < 0 || sensorIndex >= _sensors.length) return;
+
     final nowStr = DateTime.now().toString().substring(11, 19);
+    final sensor = _sensors[sensorIndex];
 
     String parsedValue(String? b) {
       if (b == null) return '--';
@@ -216,26 +287,34 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
     final v = parsedValue(body);
 
     setState(() {
-      if (idx == 1) {
-        _sensorData1 = v;
-        _sensorTime1 = nowStr;
-      } else {
-        _sensorData2 = v;
-        _sensorTime2 = nowStr;
-      }
+      sensor.data = v;
+      sensor.lastUpdateTime = nowStr;
     });
+
+    debugPrint('센서 업데이트: ${sensor.displayName} = $v');
   }
 
-  // ------------------ 수동 재연결/설정 ------------------
+  // ------------------ 헬퍼 메서드 ------------------
+  bool _isConnected() {
+    return _isWebSocketConnected;
+  } // ------------------ 수동 재연결/설정 ------------------
+
   void _manualReconnect() {
     _isConnecting = false;
     _retryTimer?.cancel();
     _heartbeatTicker?.cancel();
     _stomp?.deactivate();
+
     setState(() {
+      _isWebSocketConnected = false;
       _connectionStatus = '재연결 시도중...';
     });
-    _connectStomp();
+
+    _loadSensors(); // 센서 정보부터 다시 로딩
+  }
+
+  void _reloadSensors() async {
+    await _loadSensors();
   }
 
   void _openSettings() async {
@@ -245,20 +324,11 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
         builder: (context) => SettingsPage(
           currentIp: _serverIp,
           currentPort: _serverPort,
-          // 센서1
-          currentDeviceId1: _deviceId1,
-          currentSensorPort1: _sensorPort1,
-          // 센서2
-          currentDeviceId2: _deviceId2,
-          currentSensorPort2: _sensorPort2,
-          onSettingsChanged: (ip, port, d1, p1, d2, p2) {
+          sensors: _sensors,
+          onSettingsChanged: (ip, port) {
             setState(() {
               _serverIp = ip;
               _serverPort = port;
-              _deviceId1 = d1;
-              _sensorPort1 = p1;
-              _deviceId2 = d2;
-              _sensorPort2 = p2;
             });
             _manualReconnect();
           },
@@ -271,14 +341,10 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
   Widget build(BuildContext context) {
     final currentUrl = _usingSockJS ? _httpSockUrl : _wsUrl;
 
-    Widget sensorCard({
-      required String title,
-      required String topic,
-      required String value,
-      required String time,
-    }) {
+    Widget sensorCard(SensorInfo sensor) {
       return Card(
         elevation: 4,
+        margin: const EdgeInsets.only(bottom: 16),
         child: Padding(
           padding: const EdgeInsets.all(16.0),
           child: Column(
@@ -287,22 +353,29 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
                 children: [
                   const Icon(Icons.sensors, color: Colors.blue),
                   const SizedBox(width: 8),
-                  Text(
-                    title,
-                    style: const TextStyle(
-                      fontSize: 18,
-                      fontWeight: FontWeight.bold,
+                  Expanded(
+                    child: Text(
+                      sensor.displayName,
+                      style: const TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.bold,
+                      ),
                     ),
                   ),
                 ],
               ),
               const SizedBox(height: 8),
               Text(
-                'Topic: $topic',
+                'Serial: ${sensor.serialNumber}',
+                style: TextStyle(fontSize: 12, color: Colors.grey[600]),
+              ),
+              Text(
+                'Topic: ${sensor.topicPath}',
                 style: TextStyle(fontSize: 12, color: Colors.grey[600]),
               ),
               const SizedBox(height: 12),
               Container(
+                width: double.infinity,
                 padding: const EdgeInsets.symmetric(
                   horizontal: 24,
                   vertical: 12,
@@ -313,7 +386,8 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
                   border: Border.all(color: Colors.blue.shade200),
                 ),
                 child: Text(
-                  value,
+                  sensor.data,
+                  textAlign: TextAlign.center,
                   style: const TextStyle(
                     fontSize: 20,
                     fontWeight: FontWeight.bold,
@@ -323,7 +397,7 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
               ),
               const SizedBox(height: 8),
               Text(
-                '업데이트: $time',
+                '업데이트: ${sensor.lastUpdateTime}',
                 style: TextStyle(fontSize: 12, color: Colors.grey[600]),
               ),
             ],
@@ -338,6 +412,11 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
         title: const Text('가스 모니터링'),
         centerTitle: true,
         actions: [
+          IconButton(
+            icon: const Icon(Icons.refresh),
+            onPressed: _sensorsLoaded ? _reloadSensors : null,
+            tooltip: '센서 정보 새로고침',
+          ),
           IconButton(
             icon: const Icon(Icons.settings),
             onPressed: _openSettings,
@@ -359,17 +438,15 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
                     Row(
                       children: [
                         Icon(
-                          _connectionStatus.startsWith('연결됨')
-                              ? Icons.wifi
-                              : Icons.wifi_off,
-                          color: _connectionStatus.startsWith('연결됨')
-                              ? Colors.green
-                              : Colors.red,
+                          _isConnected() ? Icons.wifi : Icons.wifi_off,
+                          color: _isConnected() ? Colors.green : Colors.red,
                         ),
                         const SizedBox(width: 8),
-                        Text(
-                          '연결 상태: $_connectionStatus',
-                          style: const TextStyle(fontSize: 16),
+                        Expanded(
+                          child: Text(
+                            '연결 상태: $_connectionStatus',
+                            style: const TextStyle(fontSize: 16),
+                          ),
                         ),
                       ],
                     ),
@@ -385,24 +462,70 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
 
             const SizedBox(height: 16),
 
-            // 센서 2개 표시
+            // 센서 목록 표시
             Expanded(
-              child: ListView(
-                children: [
-                  sensorCard(
-                    title: '센서 #1 ($_deviceId1 / $_sensorPort1)',
-                    topic: _topic1,
-                    value: _sensorData1,
-                    time: _sensorTime1,
-                  ),
-                  sensorCard(
-                    title: '센서 #2 ($_deviceId2 / $_sensorPort2)',
-                    topic: _topic2,
-                    value: _sensorData2,
-                    time: _sensorTime2,
-                  ),
-                ],
-              ),
+              child: !_sensorsLoaded
+                  ? Center(
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          if (_sensorLoadError.isEmpty) ...[
+                            const CircularProgressIndicator(),
+                            const SizedBox(height: 16),
+                            const Text('센서 정보를 불러오는 중...'),
+                          ] else ...[
+                            const Icon(
+                              Icons.error_outline,
+                              color: Colors.red,
+                              size: 64,
+                            ),
+                            const SizedBox(height: 16),
+                            const Text(
+                              '센서 정보 로딩 실패',
+                              style: TextStyle(
+                                fontSize: 18,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                            const SizedBox(height: 8),
+                            Text(
+                              _sensorLoadError,
+                              textAlign: TextAlign.center,
+                              style: TextStyle(color: Colors.grey[600]),
+                            ),
+                            const SizedBox(height: 16),
+                            ElevatedButton.icon(
+                              onPressed: _reloadSensors,
+                              icon: const Icon(Icons.refresh),
+                              label: const Text('다시 시도'),
+                            ),
+                          ],
+                        ],
+                      ),
+                    )
+                  : _sensors.isEmpty
+                  ? const Center(
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Icon(Icons.sensors_off, color: Colors.grey, size: 64),
+                          SizedBox(height: 16),
+                          Text(
+                            '등록된 센서가 없습니다',
+                            style: TextStyle(
+                              fontSize: 18,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ],
+                      ),
+                    )
+                  : ListView.builder(
+                      itemCount: _sensors.length,
+                      itemBuilder: (context, index) {
+                        return sensorCard(_sensors[index]);
+                      },
+                    ),
             ),
 
             const SizedBox(height: 12),
@@ -434,9 +557,20 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
             const SizedBox(height: 8),
 
             // 현재 연결 정보
-            Text(
-              '$_serverIp:$_serverPort',
-              style: TextStyle(fontSize: 12, color: Colors.grey[600]),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Text(
+                  '$_serverIp:$_serverPort',
+                  style: TextStyle(fontSize: 12, color: Colors.grey[600]),
+                ),
+                if (_sensorsLoaded) ...[
+                  Text(
+                    ' • ${_sensors.length}개 센서',
+                    style: TextStyle(fontSize: 12, color: Colors.grey[600]),
+                  ),
+                ],
+              ],
             ),
           ],
         ),
