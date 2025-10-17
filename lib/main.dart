@@ -45,6 +45,11 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
   bool _sensorsLoaded = false;
   String _sensorLoadError = '';
 
+  // ---- 가스 데이터 관리 ----
+  Map<String, Map<String, String>> _sensorGroups = {};
+  Map<String, String> _sensorGroupAlarms = {};
+  String _lastUpdateTime = '--';
+
   // ---- UI 상태 ----
   String _connectionStatus = '센서 정보 로딩중...';
   bool _isWebSocketConnected = false;
@@ -264,39 +269,498 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
 
   // ------------------ 메시지 처리 ------------------
   void _updateSensor(int sensorIndex, String? body) {
-    if (sensorIndex < 0 || sensorIndex >= _sensors.length) return;
+    if (body == null || body.isEmpty || sensorIndex >= _sensors.length) return;
 
     final nowStr = DateTime.now().toString().substring(11, 19);
     final sensor = _sensors[sensorIndex];
+    final sensorId = '${sensor.modelName}_${sensor.portName}';
 
-    String parsedValue(String? b) {
-      if (b == null) return '--';
-      try {
-        final dynamic p = jsonDecode(b);
-        if (p is Map && (p.containsKey('value') || p.containsKey('data'))) {
-          return p['value']?.toString() ?? p['data']?.toString() ?? b;
-        }
-        if (p is num) return p.toStringAsFixed(2);
-      } catch (_) {
+    try {
+      // JSON 파싱
+      final dynamic data = jsonDecode(body);
+      debugPrint('받은 데이터 [$sensorId]: $data');
+
+      if (data is Map<String, dynamic>) {
+        setState(() {
+          // 센서 그룹 초기화
+          if (!_sensorGroups.containsKey(sensorId)) {
+            _sensorGroups[sensorId] = {
+              'CO': '--',
+              'O2': '--',
+              'H2S': '--',
+              'CO2': '--',
+            };
+          }
+
+          // 각 가스 데이터 업데이트
+          if (data.containsKey('co')) {
+            _sensorGroups[sensorId]!['CO'] = data['co']?.toString() ?? '--';
+          }
+          if (data.containsKey('o2')) {
+            _sensorGroups[sensorId]!['O2'] = data['o2']?.toString() ?? '--';
+          }
+          if (data.containsKey('h2s')) {
+            _sensorGroups[sensorId]!['H2S'] = data['h2s']?.toString() ?? '--';
+          }
+          if (data.containsKey('co2')) {
+            _sensorGroups[sensorId]!['CO2'] = data['co2']?.toString() ?? '--';
+          }
+
+          // 알람 메시지 처리
+          if (data.containsKey('alarmResult') && data['alarmResult'] is Map) {
+            final alarmResult = data['alarmResult'] as Map<String, dynamic>;
+            if (alarmResult.containsKey('messages') &&
+                alarmResult['messages'] is List) {
+              final messages = alarmResult['messages'] as List;
+              _sensorGroupAlarms[sensorId] = messages.isNotEmpty
+                  ? messages.first.toString()
+                  : '';
+            }
+          } else {
+            _sensorGroupAlarms[sensorId] = '';
+          }
+
+          _lastUpdateTime = nowStr;
+        });
+
+        debugPrint('센서 그룹 [$sensorId] 데이터 업데이트: ${_sensorGroups[sensorId]}');
+      }
+    } catch (e) {
+      debugPrint('JSON 파싱 오류: $e, 원본 데이터: $body');
+
+      // JSON 파싱 실패시 기존 방식으로 처리
+      String parsedValue(String? b) {
+        if (b == null) return '--';
         final n = double.tryParse(b);
         if (n != null) return n.toStringAsFixed(2);
+        return b;
       }
-      return b;
+
+      final v = parsedValue(body);
+      setState(() {
+        sensor.data = v;
+        sensor.lastUpdateTime = nowStr;
+      });
     }
-
-    final v = parsedValue(body);
-
-    setState(() {
-      sensor.data = v;
-      sensor.lastUpdateTime = nowStr;
-    });
-
-    debugPrint('센서 업데이트: ${sensor.displayName} = $v');
   }
 
-  // ------------------ 헬퍼 메서드 ------------------
-  bool _isConnected() {
-    return _isWebSocketConnected;
+  // ------------------ UI 빌더 메서드 ------------------
+  Widget _buildSensorGroupCard(String sensorId, SensorInfo sensor) {
+    final gasData =
+        _sensorGroups[sensorId] ??
+        {'CO': '--', 'O2': '--', 'H2S': '--', 'CO2': '--'};
+    final alarmMessage = _sensorGroupAlarms[sensorId] ?? '';
+
+    // 전체 센서 그룹의 상태 계산
+    bool hasError = false;
+    bool hasWarning = false;
+    for (String gasType in ['CO', 'O2', 'H2S', 'CO2']) {
+      final gasValue = gasData[gasType] ?? '--';
+      if (gasValue != '--' && gasValue.isNotEmpty) {
+        final status = _calculateGasStatus(gasType, gasValue);
+        if (status == SensorStatus.danger) {
+          hasError = true;
+          break;
+        } else if (status == SensorStatus.warning) {
+          hasWarning = true;
+        }
+      }
+    }
+
+    Color groupStatusColor = hasError
+        ? Colors.red
+        : (hasWarning ? Colors.orange : Colors.green);
+    String groupStatusText = hasError ? '위험' : (hasWarning ? '경고' : '정상');
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 16),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: groupStatusColor, width: 2),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.1),
+            blurRadius: 4,
+            offset: const Offset(0, 2),
+          ),
+        ],
+      ),
+      child: Column(
+        children: [
+          // 센서 그룹 헤더
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              color: groupStatusColor,
+              borderRadius: const BorderRadius.only(
+                topLeft: Radius.circular(14),
+                topRight: Radius.circular(14),
+              ),
+            ),
+            child: Row(
+              children: [
+                const Icon(Icons.sensors, color: Colors.white, size: 24),
+                const SizedBox(width: 12),
+                Text(
+                  '복합가스센서 #${sensorId.split('_').last}',
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.bold,
+                    fontSize: 18,
+                  ),
+                ),
+                const Spacer(),
+                Text(
+                  groupStatusText,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.bold,
+                    fontSize: 14,
+                  ),
+                ),
+              ],
+            ),
+          ),
+
+          // 가스 카드들 그리드
+          Padding(
+            padding: const EdgeInsets.all(16),
+            child: GridView.count(
+              shrinkWrap: true,
+              physics: const NeverScrollableScrollPhysics(),
+              crossAxisCount: 2,
+              crossAxisSpacing: 12,
+              mainAxisSpacing: 12,
+              childAspectRatio: 1.2,
+              children: [
+                _buildGasCard('CO', gasData['CO'] ?? '--'),
+                _buildGasCard('O2', gasData['O2'] ?? '--'),
+                _buildGasCard('H2S', gasData['H2S'] ?? '--'),
+                _buildGasCard('CO2', gasData['CO2'] ?? '--'),
+              ],
+            ),
+          ),
+
+          // 센서 상태 하단
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: Colors.grey[50],
+              borderRadius: const BorderRadius.only(
+                bottomLeft: Radius.circular(14),
+                bottomRight: Radius.circular(14),
+              ),
+            ),
+            child: Row(
+              children: [
+                Icon(
+                  hasError
+                      ? Icons.error
+                      : (hasWarning ? Icons.warning : Icons.check_circle),
+                  color: groupStatusColor,
+                  size: 16,
+                ),
+                const SizedBox(width: 8),
+                Text(
+                  '센서 상태',
+                  style: TextStyle(color: Colors.grey[600], fontSize: 12),
+                ),
+                const Spacer(),
+                if (alarmMessage.isNotEmpty) ...[
+                  Icon(Icons.warning, color: Colors.orange, size: 16),
+                  const SizedBox(width: 4),
+                ],
+                Text(
+                  groupStatusText,
+                  style: TextStyle(
+                    color: groupStatusColor,
+                    fontWeight: FontWeight.bold,
+                    fontSize: 12,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  SensorStatus _calculateGasStatus(String gasType, String gasValue) {
+    final threshold = GasThresholds.thresholds[gasType];
+    if (gasValue == '--' || gasValue.isEmpty || threshold == null) {
+      return SensorStatus.error;
+    }
+
+    final numValue = double.tryParse(gasValue);
+    if (numValue == null) return SensorStatus.error;
+
+    final normalMin = threshold['normal_min'] as num;
+    final normalMax = threshold['normal_max'] as num;
+
+    // 정상 범위
+    if (numValue >= normalMin && numValue <= normalMax) {
+      return SensorStatus.normal;
+    }
+
+    // 경고 범위 (±20%)
+    final warningMinLow = normalMin * 0.8;
+    final warningMaxHigh = normalMax * 1.2;
+
+    if (numValue >= warningMinLow && numValue <= warningMaxHigh) {
+      return SensorStatus.warning;
+    }
+
+    // 위험 범위
+    return SensorStatus.danger;
+  }
+
+  Widget _buildGasCard(String gasType, String gasValue) {
+    final threshold = GasThresholds.thresholds[gasType];
+    final status = _calculateGasStatus(gasType, gasValue);
+
+    Color cardColor;
+    switch (status) {
+      case SensorStatus.normal:
+        cardColor = Colors.green;
+        break;
+      case SensorStatus.warning:
+        cardColor = Colors.orange;
+        break;
+      case SensorStatus.danger:
+        cardColor = Colors.red;
+        break;
+      case SensorStatus.error:
+        cardColor = Colors.grey;
+        break;
+    }
+
+    return Container(
+      decoration: BoxDecoration(
+        color: cardColor,
+        borderRadius: BorderRadius.circular(12),
+        boxShadow: [
+          BoxShadow(
+            color: cardColor.withOpacity(0.3),
+            blurRadius: 4,
+            offset: const Offset(0, 2),
+          ),
+        ],
+      ),
+      padding: const EdgeInsets.all(12),
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          // 가스 타입과 정상 범위
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Text(
+                    gasType,
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.bold,
+                      fontSize: 16,
+                    ),
+                  ),
+                  if (gasType == 'O2')
+                    const Text(
+                      '₂',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontWeight: FontWeight.bold,
+                        fontSize: 12,
+                      ),
+                    ),
+                  if (gasType == 'H2S')
+                    const Text(
+                      '₂S',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontWeight: FontWeight.bold,
+                        fontSize: 12,
+                      ),
+                    ),
+                  if (gasType == 'CO2')
+                    const Text(
+                      '₂',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontWeight: FontWeight.bold,
+                        fontSize: 12,
+                      ),
+                    ),
+                ],
+              ),
+              if (threshold != null)
+                Text(
+                  '정상: ${threshold['normal_min']}~${threshold['normal_max']} ${threshold['unit']}',
+                  style: const TextStyle(color: Colors.white70, fontSize: 10),
+                ),
+            ],
+          ),
+
+          // 큰 실선 표시
+          Container(
+            width: double.infinity,
+            height: 4,
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(2),
+            ),
+          ),
+
+          // 값과 단위
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(
+                gasValue == '--' ? '--' : gasValue,
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.bold,
+                  fontSize: 20,
+                ),
+              ),
+              Text(
+                threshold?['unit'] ?? '',
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.bold,
+                  fontSize: 16,
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSensorCard(SensorInfo sensor) {
+    final threshold = sensor.thresholdInfo;
+    final gasType = sensor.gasType;
+
+    return Container(
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: sensor.statusColor, width: 3),
+        boxShadow: [
+          BoxShadow(
+            color: sensor.statusColor.withOpacity(0.2),
+            blurRadius: 8,
+            offset: const Offset(0, 4),
+          ),
+        ],
+      ),
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // 가스 타입과 아이콘
+          Row(
+            children: [
+              Container(
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color:
+                      threshold?['color']?.withOpacity(0.1) ??
+                      Colors.grey.withOpacity(0.1),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Icon(
+                  threshold?['icon'] ?? Icons.sensors,
+                  color: threshold?['color'] ?? Colors.grey,
+                  size: 24,
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      gasType,
+                      style: const TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    Text(
+                      sensor.portName,
+                      style: TextStyle(fontSize: 12, color: Colors.grey[600]),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+
+          const SizedBox(height: 16),
+
+          // 센서 값 표시
+          Center(
+            child: Column(
+              children: [
+                Text(
+                  sensor.dataWithUnit,
+                  style: TextStyle(
+                    fontSize: 32,
+                    fontWeight: FontWeight.bold,
+                    color: sensor.statusColor,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 8,
+                    vertical: 4,
+                  ),
+                  decoration: BoxDecoration(
+                    color: sensor.statusColor,
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Text(
+                    sensor.statusText,
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.bold,
+                      fontSize: 12,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+
+          const Spacer(),
+
+          // 정상 범위 표시
+          if (threshold != null) ...[
+            const SizedBox(height: 8),
+            Text(
+              sensor.normalRangeText,
+              style: TextStyle(fontSize: 10, color: Colors.grey[600]),
+              textAlign: TextAlign.center,
+            ),
+          ],
+
+          // 업데이트 시간
+          Text(
+            '업데이트: ${sensor.lastUpdateTime}',
+            style: TextStyle(fontSize: 10, color: Colors.grey[500]),
+            textAlign: TextAlign.center,
+          ),
+        ],
+      ),
+    );
   } // ------------------ 수동 재연결/설정 ------------------
 
   void _manualReconnect() {
@@ -339,78 +803,13 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
 
   @override
   Widget build(BuildContext context) {
-    final currentUrl = _usingSockJS ? _httpSockUrl : _wsUrl;
-
-    Widget sensorCard(SensorInfo sensor) {
-      return Card(
-        elevation: 4,
-        margin: const EdgeInsets.only(bottom: 16),
-        child: Padding(
-          padding: const EdgeInsets.all(16.0),
-          child: Column(
-            children: [
-              Row(
-                children: [
-                  const Icon(Icons.sensors, color: Colors.blue),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Text(
-                      sensor.displayName,
-                      style: const TextStyle(
-                        fontSize: 18,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 8),
-              Text(
-                'Serial: ${sensor.serialNumber}',
-                style: TextStyle(fontSize: 12, color: Colors.grey[600]),
-              ),
-              Text(
-                'Topic: ${sensor.topicPath}',
-                style: TextStyle(fontSize: 12, color: Colors.grey[600]),
-              ),
-              const SizedBox(height: 12),
-              Container(
-                width: double.infinity,
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 24,
-                  vertical: 12,
-                ),
-                decoration: BoxDecoration(
-                  color: Colors.blue.shade50,
-                  borderRadius: BorderRadius.circular(12),
-                  border: Border.all(color: Colors.blue.shade200),
-                ),
-                child: Text(
-                  sensor.data,
-                  textAlign: TextAlign.center,
-                  style: const TextStyle(
-                    fontSize: 20,
-                    fontWeight: FontWeight.bold,
-                    color: Colors.blue,
-                  ),
-                ),
-              ),
-              const SizedBox(height: 8),
-              Text(
-                '업데이트: ${sensor.lastUpdateTime}',
-                style: TextStyle(fontSize: 12, color: Colors.grey[600]),
-              ),
-            ],
-          ),
-        ),
-      );
-    }
-
     return Scaffold(
+      backgroundColor: Colors.grey[100],
       appBar: AppBar(
         backgroundColor: Theme.of(context).colorScheme.inversePrimary,
-        title: const Text('가스 모니터링'),
+        title: const Text('가스 모니터링 시스템'),
         centerTitle: true,
+        elevation: 2,
         actions: [
           IconButton(
             icon: const Icon(Icons.refresh),
@@ -424,114 +823,186 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
           ),
         ],
       ),
-      body: Padding(
-        padding: const EdgeInsets.all(16.0),
-        child: Column(
-          children: [
-            // 연결 상태 카드
-            Card(
-              elevation: 4,
-              child: Padding(
-                padding: const EdgeInsets.all(16.0),
-                child: Column(
-                  children: [
-                    Row(
-                      children: [
-                        Icon(
-                          _isConnected() ? Icons.wifi : Icons.wifi_off,
-                          color: _isConnected() ? Colors.green : Colors.red,
+      body: Column(
+        children: [
+          // 연결 상태 표시
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(16),
+            margin: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              color: _isWebSocketConnected ? Colors.green : Colors.red,
+              borderRadius: BorderRadius.circular(12),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withOpacity(0.1),
+                  blurRadius: 4,
+                  offset: const Offset(0, 2),
+                ),
+              ],
+            ),
+            child: Row(
+              children: [
+                Icon(
+                  _isWebSocketConnected ? Icons.wifi : Icons.wifi_off,
+                  color: Colors.white,
+                  size: 24,
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        _isWebSocketConnected ? '실시간 모니터링 중' : '연결 끊김',
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontWeight: FontWeight.bold,
+                          fontSize: 16,
                         ),
-                        const SizedBox(width: 8),
-                        Expanded(
+                      ),
+                      Text(
+                        '$_serverIp:$_serverPort',
+                        style: const TextStyle(
+                          color: Colors.white70,
+                          fontSize: 12,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+
+          // 알람 메시지 표시
+          if (_sensorGroupAlarms.values.any((alarm) => alarm.isNotEmpty)) ...[
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(16),
+              margin: const EdgeInsets.symmetric(horizontal: 16),
+              decoration: BoxDecoration(
+                color: Colors.orange.shade100,
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: Colors.orange),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Row(
+                    children: [
+                      Icon(Icons.warning, color: Colors.orange),
+                      SizedBox(width: 12),
+                      Text(
+                        '알람 메시지',
+                        style: TextStyle(
+                          fontWeight: FontWeight.bold,
+                          color: Colors.orange,
+                          fontSize: 16,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  ..._sensorGroupAlarms.entries
+                      .where((entry) => entry.value.isNotEmpty)
+                      .map(
+                        (entry) => Padding(
+                          padding: const EdgeInsets.only(bottom: 4),
                           child: Text(
-                            '연결 상태: $_connectionStatus',
-                            style: const TextStyle(fontSize: 16),
+                            '• ${entry.value}',
+                            style: const TextStyle(
+                              color: Colors.orange,
+                              fontSize: 14,
+                            ),
                           ),
                         ),
-                      ],
-                    ),
-                    const SizedBox(height: 8),
-                    Text(
-                      'WebSocket: $currentUrl',
-                      style: TextStyle(fontSize: 12, color: Colors.grey[600]),
-                    ),
-                  ],
-                ),
+                      ),
+                ],
               ),
             ),
-
             const SizedBox(height: 16),
+          ],
 
-            // 센서 목록 표시
-            Expanded(
-              child: !_sensorsLoaded
-                  ? Center(
-                      child: Column(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          if (_sensorLoadError.isEmpty) ...[
-                            const CircularProgressIndicator(),
-                            const SizedBox(height: 16),
-                            const Text('센서 정보를 불러오는 중...'),
-                          ] else ...[
-                            const Icon(
-                              Icons.error_outline,
-                              color: Colors.red,
-                              size: 64,
-                            ),
-                            const SizedBox(height: 16),
-                            const Text(
-                              '센서 정보 로딩 실패',
-                              style: TextStyle(
-                                fontSize: 18,
-                                fontWeight: FontWeight.bold,
-                              ),
-                            ),
-                            const SizedBox(height: 8),
-                            Text(
-                              _sensorLoadError,
-                              textAlign: TextAlign.center,
-                              style: TextStyle(color: Colors.grey[600]),
-                            ),
-                            const SizedBox(height: 16),
-                            ElevatedButton.icon(
-                              onPressed: _reloadSensors,
-                              icon: const Icon(Icons.refresh),
-                              label: const Text('다시 시도'),
-                            ),
-                          ],
-                        ],
-                      ),
-                    )
-                  : _sensors.isEmpty
-                  ? const Center(
-                      child: Column(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          Icon(Icons.sensors_off, color: Colors.grey, size: 64),
-                          SizedBox(height: 16),
-                          Text(
-                            '등록된 센서가 없습니다',
+          // 센서 그룹 리스트
+          Expanded(
+            child: !_sensorsLoaded
+                ? Center(
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        if (_sensorLoadError.isEmpty) ...[
+                          const CircularProgressIndicator(),
+                          const SizedBox(height: 16),
+                          const Text(
+                            '센서 정보를 불러오는 중...',
+                            style: TextStyle(fontSize: 16),
+                          ),
+                        ] else ...[
+                          const Icon(
+                            Icons.error_outline,
+                            color: Colors.red,
+                            size: 64,
+                          ),
+                          const SizedBox(height: 16),
+                          const Text(
+                            '센서 정보 로딩 실패',
                             style: TextStyle(
                               fontSize: 18,
                               fontWeight: FontWeight.bold,
                             ),
                           ),
+                          const SizedBox(height: 8),
+                          Text(
+                            _sensorLoadError,
+                            textAlign: TextAlign.center,
+                            style: TextStyle(color: Colors.grey[600]),
+                          ),
+                          const SizedBox(height: 16),
+                          ElevatedButton.icon(
+                            onPressed: _reloadSensors,
+                            icon: const Icon(Icons.refresh),
+                            label: const Text('다시 시도'),
+                          ),
                         ],
-                      ),
-                    )
-                  : ListView.builder(
+                      ],
+                    ),
+                  )
+                : _sensors.isEmpty
+                ? const Center(
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Icon(Icons.sensors_off, color: Colors.grey, size: 64),
+                        SizedBox(height: 16),
+                        Text(
+                          '등록된 센서가 없습니다',
+                          style: TextStyle(
+                            fontSize: 18,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ],
+                    ),
+                  )
+                : Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 16),
+                    child: ListView.builder(
                       itemCount: _sensors.length,
                       itemBuilder: (context, index) {
-                        return sensorCard(_sensors[index]);
+                        final sensor = _sensors[index];
+                        final sensorId =
+                            '${sensor.modelName}_${sensor.portName}';
+                        return _buildSensorGroupCard(sensorId, sensor);
                       },
                     ),
-            ),
+                  ),
+          ),
 
-            const SizedBox(height: 12),
-
-            // 재연결/설정
-            Row(
+          // 하단 컨트롤 버튼들
+          Container(
+            padding: const EdgeInsets.all(16),
+            child: Row(
               children: [
                 Expanded(
                   child: ElevatedButton.icon(
@@ -544,36 +1015,23 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
                           )
                         : const Icon(Icons.refresh),
                     label: Text(_isConnecting ? '연결중...' : '재연결'),
+                    style: ElevatedButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(vertical: 12),
+                    ),
                   ),
                 ),
-                const SizedBox(width: 8),
-                OutlinedButton(
+                const SizedBox(width: 12),
+                ElevatedButton(
                   onPressed: _openSettings,
+                  style: ElevatedButton.styleFrom(
+                    padding: const EdgeInsets.all(12),
+                  ),
                   child: const Icon(Icons.settings),
                 ),
               ],
             ),
-
-            const SizedBox(height: 8),
-
-            // 현재 연결 정보
-            Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Text(
-                  '$_serverIp:$_serverPort',
-                  style: TextStyle(fontSize: 12, color: Colors.grey[600]),
-                ),
-                if (_sensorsLoaded) ...[
-                  Text(
-                    ' • ${_sensors.length}개 센서',
-                    style: TextStyle(fontSize: 12, color: Colors.grey[600]),
-                  ),
-                ],
-              ],
-            ),
-          ],
-        ),
+          ),
+        ],
       ),
     );
   }
