@@ -565,7 +565,7 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
                 const Spacer(),
                 Text(
                   statusText,
-                  style: const TextStyle(color: Colors.black, fontSize: 14),
+                  style: TextStyle(color: statusColor, fontSize: 14),
                 ),
               ],
             ),
@@ -658,10 +658,6 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
                   style: TextStyle(color: Colors.grey[600], fontSize: 12),
                 ),
                 const Spacer(),
-                if (alarmMessage.isNotEmpty) ...[
-                  const Icon(Icons.warning, color: Colors.orange, size: 16),
-                  const SizedBox(width: 4),
-                ],
                 Text(
                   statusText,
                   style: TextStyle(
@@ -754,7 +750,7 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
                 const Spacer(),
                 Text(
                   groupStatusText,
-                  style: const TextStyle(color: Colors.black, fontSize: 14),
+                  style: TextStyle(color: groupStatusColor, fontSize: 14),
                 ),
               ],
             ),
@@ -792,23 +788,12 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
             ),
             child: Row(
               children: [
-                Icon(
-                  hasError
-                      ? Icons.error
-                      : (hasWarning ? Icons.warning : Icons.check_circle),
-                  color: groupStatusColor,
-                  size: 16,
-                ),
                 const SizedBox(width: 8),
                 Text(
                   '센서 상태',
                   style: TextStyle(color: Colors.grey[600], fontSize: 12),
                 ),
                 const Spacer(),
-                if (alarmMessage.isNotEmpty) ...[
-                  Icon(Icons.warning, color: Colors.orange, size: 16),
-                  const SizedBox(width: 4),
-                ],
                 Text(
                   groupStatusText,
                   style: TextStyle(
