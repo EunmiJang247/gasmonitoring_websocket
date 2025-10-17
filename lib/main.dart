@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'dart:convert';
 import 'dart:async';
+import 'dart:developer' as developer;
+import 'dart:io' show stdout;
 import 'package:stomp_dart_client/stomp.dart';
 import 'package:stomp_dart_client/stomp_config.dart';
 import 'package:stomp_dart_client/stomp_frame.dart';
@@ -10,6 +12,25 @@ import 'settings_page.dart';
 
 void main() {
   runApp(const MyApp());
+}
+
+// 통합 로그 함수
+void logMessage(String message, {String? name}) {
+  final timestamp = DateTime.now().toString().substring(11, 19);
+  final logLine = '[$timestamp] ${name != null ? '[$name] ' : ''}$message';
+
+  // 콘솔 출력 (브라우저)
+  debugPrint(logLine);
+
+  // Developer log (브라우저)
+  developer.log(message, name: name ?? 'GasMonitoring');
+
+  // stdout 출력 시도 (웹에서는 작동하지 않지만 데스크톱에서는 작동)
+  try {
+    stdout.writeln(logLine);
+  } catch (e) {
+    // 웹에서는 stdout이 없으므로 무시
+  }
 }
 
 class MyApp extends StatelessWidget {
@@ -37,8 +58,8 @@ class GasMonitoringPage extends StatefulWidget {
 
 class _GasMonitoringPageState extends State<GasMonitoringPage> {
   // ---- 서버 설정 ----
-  String _serverIp = '192.168.0.224';
-  String _serverPort = '8080';
+  String _serverIp = '192.168.0.165';
+  String _serverPort = '8081';
 
   // ---- 동적 센서 관리 ----
   List<SensorInfo> _sensors = [];
@@ -46,7 +67,8 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
   String _sensorLoadError = '';
 
   // ---- 가스 데이터 관리 ----
-  Map<String, Map<String, String>> _sensorGroups = {};
+  Map<String, Map<String, String>> _sensorGroups = {}; // 복합가스센서용
+  Map<String, Map<String, String>> _lelSensors = {}; // LEL센서용
   Map<String, String> _sensorGroupAlarms = {};
   String _lastUpdateTime = '--';
 
@@ -88,7 +110,10 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
     });
 
     try {
-      debugPrint('센서 매핑 API 호출: $_apiUrl');
+      print('=== 센서 정보 로딩 시작 ===');
+      print('API URL: $_apiUrl');
+      print('서버: $_serverIp:$_serverPort');
+
       final response = await http
           .get(
             Uri.parse(_apiUrl),
@@ -96,13 +121,20 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
           )
           .timeout(const Duration(seconds: 10));
 
+      print('HTTP 응답 코드: ${response.statusCode}');
+      print('HTTP 응답 헤더: ${response.headers}');
+      print('HTTP 응답 바디: ${response.body}');
+
       if (response.statusCode == 200) {
         final Map<String, dynamic> responseData = jsonDecode(response.body);
-        debugPrint('API 응답: $responseData');
+        print('파싱된 응답 데이터: $responseData');
 
         if (responseData['code'] == 200 && responseData['data'] != null) {
           final List<dynamic> sensorsJson =
               responseData['data']['sensors'] ?? [];
+
+          print('센서 배열 길이: ${sensorsJson.length}');
+          print('센서 원본 데이터: $sensorsJson');
 
           setState(() {
             _sensors = sensorsJson
@@ -112,19 +144,29 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
             _connectionStatus = '센서 ${_sensors.length}개 로딩 완료';
           });
 
-          debugPrint('로딩된 센서들:');
-          for (var sensor in _sensors) {
-            debugPrint('  - ${sensor.displayName}: ${sensor.topicPath}');
+          print('--- 로딩된 센서 목록 ---');
+          for (int i = 0; i < _sensors.length; i++) {
+            final sensor = _sensors[i];
+            print('센서 ${i + 1}:');
+            print('  - 표시명: ${sensor.displayName}');
+            print('  - 모델명: ${sensor.modelName}');
+            print('  - 포트명: ${sensor.portName}');
+            print('  - 시리얼: ${sensor.serialNumber}');
+            print('  - 토픽: ${sensor.topicPath}');
+            print('  - 가스타입: ${sensor.gasType}');
           }
 
           // 센서 로딩 완료 후 WebSocket 연결 시작
           if (_sensors.isNotEmpty) {
+            print('센서 로딩 완료 → 웹소켓 연결 시작');
             _connectStomp();
           } else {
             setState(() {
               _connectionStatus = '등록된 센서가 없습니다';
             });
+            print('경고: 등록된 센서가 없습니다');
           }
+          print('=== 센서 정보 로딩 완료 ===\n');
         } else {
           throw Exception(
             'API 응답 오류: ${responseData['message'] ?? 'Unknown error'}',
@@ -139,7 +181,8 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
         _connectionStatus = '센서 로딩 실패: $e';
         _sensorsLoaded = false;
       });
-      debugPrint('센서 로딩 오류: $e');
+      print('ERROR: 센서 로딩 실패 - $e');
+      print('=== 센서 정보 로딩 실패 ===\n');
     }
   }
 
@@ -194,31 +237,52 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
     _isConnecting = false;
     _retryTimer?.cancel();
 
+    print('=== 웹소켓 연결 성공 ===');
+    print('연결 타입: ${_usingSockJS ? "SockJS" : "순수 WebSocket"}');
+    print('서버: $_serverIp:$_serverPort');
+    print('프레임 헤더: ${frame.headers}');
+    print('프레임 바디: ${frame.body}');
+
     setState(() {
       _isWebSocketConnected = true;
       _connectionStatus = 'WebSocket 연결됨 (${_usingSockJS ? "SockJS" : "WS"})';
     });
 
     // ✅ 모든 센서들을 구독
+    print('--- 센서 구독 시작 ---');
     for (int i = 0; i < _sensors.length; i++) {
       final sensor = _sensors[i];
-      debugPrint('센서 구독: ${sensor.topicPath}');
+      print('센서 ${i + 1}/${_sensors.length}: ${sensor.displayName}');
+      print('  - 토픽: ${sensor.topicPath}');
+      print('  - 모델: ${sensor.modelName}');
+      print('  - 포트: ${sensor.portName}');
+      print('  - 시리얼: ${sensor.serialNumber}');
 
       _stomp?.subscribe(
         destination: sensor.topicPath,
         headers: const {'ack': 'auto'},
-        callback: (msg) => _updateSensor(i, msg.body),
+        callback: (msg) {
+          print(
+            '센서 ${i + 1} 메시지 수신: ${msg.body?.substring(0, 100)}${(msg.body?.length ?? 0) > 100 ? '...' : ''}',
+          );
+          _updateSensor(i, msg.body);
+        },
       );
+      print('  ✓ 구독 완료');
     }
 
     _heartbeatTicker?.cancel();
-    _heartbeatTicker = Stream.periodic(
-      const Duration(seconds: 15),
-    ).listen((_) => debugPrint('[hb] alive'));
+    _heartbeatTicker = Stream.periodic(const Duration(seconds: 15)).listen((_) {
+      print(
+        '[HEARTBEAT] ${DateTime.now().toString().substring(11, 19)} - 연결 유지 중',
+      );
+    });
 
     setState(() {
       _connectionStatus = '${_sensors.length}개 센서 구독 완료';
     });
+
+    print('=== 웹소켓 구독 완료 ===\n');
   }
 
   void _onStompError(StompFrame frame) {
@@ -275,46 +339,120 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
     final sensor = _sensors[sensorIndex];
     final sensorId = '${sensor.modelName}_${sensor.portName}';
 
+    // 원본 데이터 출력
+    logMessage('=== 웹소켓 데이터 수신 ===', name: 'WebSocket');
+    logMessage('시간: $nowStr', name: 'WebSocket');
+    logMessage('센서: $sensorId (${sensor.displayName})', name: 'WebSocket');
+    logMessage('원본 데이터: $body', name: 'WebSocketData');
+    logMessage('데이터 길이: ${body.length} bytes', name: 'WebSocket');
+
     try {
       // JSON 파싱
       final dynamic data = jsonDecode(body);
-      debugPrint('받은 데이터 [$sensorId]: $data');
+      logMessage('파싱된 JSON: $data', name: 'ParsedData');
+      logMessage('JSON 타입: ${data.runtimeType}', name: 'ParsedData');
 
       if (data is Map<String, dynamic>) {
-        setState(() {
-          // 센서 그룹 초기화
-          if (!_sensorGroups.containsKey(sensorId)) {
-            _sensorGroups[sensorId] = {
-              'CO': '--',
-              'O2': '--',
-              'H2S': '--',
-              'CO2': '--',
-            };
-          }
+        logMessage('--- 가스 데이터 ---', name: 'GasData');
+        data.forEach((key, value) {
+          logMessage('  $key: $value (${value.runtimeType})', name: 'GasData');
+        });
 
-          // 각 가스 데이터 업데이트
-          if (data.containsKey('co')) {
-            _sensorGroups[sensorId]!['CO'] = data['co']?.toString() ?? '--';
-          }
-          if (data.containsKey('o2')) {
-            _sensorGroups[sensorId]!['O2'] = data['o2']?.toString() ?? '--';
-          }
-          if (data.containsKey('h2s')) {
-            _sensorGroups[sensorId]!['H2S'] = data['h2s']?.toString() ?? '--';
-          }
-          if (data.containsKey('co2')) {
-            _sensorGroups[sensorId]!['CO2'] = data['co2']?.toString() ?? '--';
+        // 센서 타입 판별 (LEL 센서 vs 복합가스센서)
+        final isLelSensor =
+            data.containsKey('lel') ||
+            sensor.modelName.toLowerCase().contains('lel');
+
+        setState(() {
+          if (isLelSensor) {
+            // LEL 센서 처리
+            if (!_lelSensors.containsKey(sensorId)) {
+              _lelSensors[sensorId] = {
+                'lel': '--',
+                'temperature': '--',
+                'humidity': '--',
+                'gasId': '--',
+              };
+              logMessage('새 LEL 센서 초기화: $sensorId', name: 'LELSensor');
+            }
+
+            // LEL 센서 데이터 업데이트
+            if (data.containsKey('lel')) {
+              final oldValue = _lelSensors[sensorId]!['lel'];
+              final newValue = data['lel']?.toString() ?? '--';
+              _lelSensors[sensorId]!['lel'] = newValue;
+              logMessage('LEL 업데이트: $oldValue → $newValue', name: 'LELUpdate');
+            }
+            if (data.containsKey('temperature')) {
+              final oldValue = _lelSensors[sensorId]!['temperature'];
+              final newValue = data['temperature']?.toString() ?? '--';
+              _lelSensors[sensorId]!['temperature'] = newValue;
+              logMessage('온도 업데이트: $oldValue → $newValue', name: 'LELUpdate');
+            }
+            if (data.containsKey('humidity')) {
+              final oldValue = _lelSensors[sensorId]!['humidity'];
+              final newValue = data['humidity']?.toString() ?? '--';
+              _lelSensors[sensorId]!['humidity'] = newValue;
+              logMessage('습도 업데이트: $oldValue → $newValue', name: 'LELUpdate');
+            }
+            if (data.containsKey('gasId')) {
+              final oldValue = _lelSensors[sensorId]!['gasId'];
+              final newValue = data['gasId']?.toString() ?? '--';
+              _lelSensors[sensorId]!['gasId'] = newValue;
+              logMessage('가스ID 업데이트: $oldValue → $newValue', name: 'LELUpdate');
+            }
+          } else {
+            // 복합가스센서 처리 (기존 로직)
+            if (!_sensorGroups.containsKey(sensorId)) {
+              _sensorGroups[sensorId] = {
+                'CO': '--',
+                'O2': '--',
+                'H2S': '--',
+                'CO2': '--',
+              };
+              logMessage('새 센서 그룹 초기화: $sensorId', name: 'SensorGroup');
+            }
+
+            // 각 가스 데이터 업데이트
+            if (data.containsKey('co')) {
+              final oldValue = _sensorGroups[sensorId]!['CO'];
+              final newValue = data['co']?.toString() ?? '--';
+              _sensorGroups[sensorId]!['CO'] = newValue;
+              logMessage('CO 업데이트: $oldValue → $newValue', name: 'GasUpdate');
+            }
+            if (data.containsKey('o2')) {
+              final oldValue = _sensorGroups[sensorId]!['O2'];
+              final newValue = data['o2']?.toString() ?? '--';
+              _sensorGroups[sensorId]!['O2'] = newValue;
+              logMessage('O2 업데이트: $oldValue → $newValue', name: 'GasUpdate');
+            }
+            if (data.containsKey('h2s')) {
+              final oldValue = _sensorGroups[sensorId]!['H2S'];
+              final newValue = data['h2s']?.toString() ?? '--';
+              _sensorGroups[sensorId]!['H2S'] = newValue;
+              logMessage('H2S 업데이트: $oldValue → $newValue', name: 'GasUpdate');
+            }
+            if (data.containsKey('co2')) {
+              final oldValue = _sensorGroups[sensorId]!['CO2'];
+              final newValue = data['co2']?.toString() ?? '--';
+              _sensorGroups[sensorId]!['CO2'] = newValue;
+              logMessage('CO2 업데이트: $oldValue → $newValue', name: 'GasUpdate');
+            }
           }
 
           // 알람 메시지 처리
           if (data.containsKey('alarmResult') && data['alarmResult'] is Map) {
             final alarmResult = data['alarmResult'] as Map<String, dynamic>;
+            print('알람 결과: $alarmResult');
             if (alarmResult.containsKey('messages') &&
                 alarmResult['messages'] is List) {
               final messages = alarmResult['messages'] as List;
-              _sensorGroupAlarms[sensorId] = messages.isNotEmpty
+              final newAlarm = messages.isNotEmpty
                   ? messages.first.toString()
                   : '';
+              final oldAlarm = _sensorGroupAlarms[sensorId] ?? '';
+              _sensorGroupAlarms[sensorId] = newAlarm;
+              print('알람 메시지 업데이트: "$oldAlarm" → "$newAlarm"');
             }
           } else {
             _sensorGroupAlarms[sensorId] = '';
@@ -323,10 +461,16 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
           _lastUpdateTime = nowStr;
         });
 
-        debugPrint('센서 그룹 [$sensorId] 데이터 업데이트: ${_sensorGroups[sensorId]}');
+        print('--- 업데이트 완료 ---');
+        print('센서 그룹 [$sensorId] 최종 데이터: ${_sensorGroups[sensorId]}');
+        print('알람 상태: ${_sensorGroupAlarms[sensorId]}');
+        print('=======================\n');
+      } else {
+        print('ERROR: 데이터가 Map 형태가 아닙니다: ${data.runtimeType}');
       }
     } catch (e) {
-      debugPrint('JSON 파싱 오류: $e, 원본 데이터: $body');
+      print('JSON 파싱 오류: $e');
+      print('원본 데이터: $body');
 
       // JSON 파싱 실패시 기존 방식으로 처리
       String parsedValue(String? b) {
@@ -341,15 +485,208 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
         sensor.data = v;
         sensor.lastUpdateTime = nowStr;
       });
+
+      print('기존 방식으로 처리됨: ${sensor.displayName} = $v');
+      print('=======================\n');
     }
   }
 
   // ------------------ UI 빌더 메서드 ------------------
+  Widget _buildLelSensorCard(String sensorId, SensorInfo sensor) {
+    final lelData =
+        _lelSensors[sensorId] ??
+        {'lel': '--', 'temperature': '--', 'humidity': '--', 'gasId': '--'};
+    final alarmMessage = _sensorGroupAlarms[sensorId] ?? '';
+
+    // LEL 값으로 상태 계산 (0-10% 정상 범위)
+    final lelValue = lelData['lel'] ?? '--';
+    Color statusColor = Colors.green;
+    String statusText = '정상';
+
+    if (lelValue != '--' && lelValue.isNotEmpty) {
+      final numValue = double.tryParse(lelValue);
+      if (numValue != null) {
+        if (numValue > 10) {
+          statusColor = Colors.red;
+          statusText = '위험';
+        } else if (numValue > 8) {
+          statusColor = Colors.orange;
+          statusText = '경고';
+        } else {
+          statusColor = Colors.green;
+          statusText = '정상';
+        }
+      }
+    }
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 16),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: statusColor, width: 2),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.1),
+            blurRadius: 4,
+            offset: const Offset(0, 2),
+          ),
+        ],
+      ),
+      child: Column(
+        children: [
+          // LEL 센서 헤더
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(6),
+            decoration: BoxDecoration(
+              color: statusColor,
+              borderRadius: const BorderRadius.only(
+                topLeft: Radius.circular(14),
+                topRight: Radius.circular(14),
+              ),
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 12),
+            child: Row(
+              children: [
+                Text(
+                  'LEL센서 #${sensorId.split('_').last}',
+                  style: const TextStyle(
+                    color: Colors.black,
+                    fontWeight: FontWeight.bold,
+                    fontSize: 18,
+                  ),
+                ),
+                const Spacer(),
+                Text(
+                  statusText,
+                  style: const TextStyle(color: Colors.black, fontSize: 14),
+                ),
+              ],
+            ),
+          ),
+
+          // LEL 메인 카드
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            child: Container(
+              width: double.infinity,
+              decoration: BoxDecoration(
+                color: statusColor,
+                borderRadius: BorderRadius.circular(12),
+                boxShadow: [
+                  BoxShadow(
+                    color: statusColor.withOpacity(0.3),
+                    blurRadius: 4,
+                    offset: const Offset(0, 2),
+                  ),
+                ],
+              ),
+              padding: const EdgeInsets.all(20),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  // LEL 라벨과 정상 범위
+                  const Text(
+                    'LEL',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.bold,
+                      fontSize: 16,
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  const Text(
+                    '정상: 0~10 %',
+                    style: TextStyle(color: Colors.white70, fontSize: 12),
+                  ),
+                  const SizedBox(height: 20),
+
+                  // 값과 단위
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Text(
+                        lelData['humidity'] == '--'
+                            ? '--'
+                            : '${lelData['humidity']}',
+
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontWeight: FontWeight.bold,
+                          fontSize: 32,
+                        ),
+                      ),
+                    ],
+                  ),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Text(
+                        "%",
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontWeight: FontWeight.bold,
+                          fontSize: 32,
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ),
+
+          // 센서 상태 하단
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 12),
+            decoration: BoxDecoration(
+              color: Colors.grey[50],
+              borderRadius: const BorderRadius.only(
+                bottomLeft: Radius.circular(14),
+                bottomRight: Radius.circular(14),
+              ),
+            ),
+            child: Row(
+              children: [
+                Text(
+                  '센서 상태',
+                  style: TextStyle(color: Colors.grey[600], fontSize: 12),
+                ),
+                const Spacer(),
+                if (alarmMessage.isNotEmpty) ...[
+                  const Icon(Icons.warning, color: Colors.orange, size: 16),
+                  const SizedBox(width: 4),
+                ],
+                Text(
+                  statusText,
+                  style: TextStyle(
+                    color: statusColor,
+                    fontWeight: FontWeight.bold,
+                    fontSize: 12,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildSensorGroupCard(String sensorId, SensorInfo sensor) {
     final gasData =
         _sensorGroups[sensorId] ??
         {'CO': '--', 'O2': '--', 'H2S': '--', 'CO2': '--'};
     final alarmMessage = _sensorGroupAlarms[sensorId] ?? '';
+
+    // 디버그 로그 추가
+    logMessage('복합가스센서 카드 빌드: $sensorId', name: 'UI');
+    logMessage('가스데이터: $gasData', name: 'UI');
+    logMessage('전체 센서그룹: ${_sensorGroups.keys.toList()}', name: 'UI');
 
     // 전체 센서 그룹의 상태 계산
     bool hasError = false;
@@ -391,7 +728,7 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
           // 센서 그룹 헤더
           Container(
             width: double.infinity,
-            padding: const EdgeInsets.all(16),
+            padding: const EdgeInsets.all(6),
             decoration: BoxDecoration(
               color: groupStatusColor,
               borderRadius: const BorderRadius.only(
@@ -399,14 +736,16 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
                 topRight: Radius.circular(14),
               ),
             ),
+          ),
+
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 12),
             child: Row(
               children: [
-                const Icon(Icons.sensors, color: Colors.white, size: 24),
-                const SizedBox(width: 12),
                 Text(
                   '복합가스센서 #${sensorId.split('_').last}',
                   style: const TextStyle(
-                    color: Colors.white,
+                    color: Colors.black,
                     fontWeight: FontWeight.bold,
                     fontSize: 18,
                   ),
@@ -414,11 +753,7 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
                 const Spacer(),
                 Text(
                   groupStatusText,
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontWeight: FontWeight.bold,
-                    fontSize: 14,
-                  ),
+                  style: const TextStyle(color: Colors.black, fontSize: 14),
                 ),
               ],
             ),
@@ -426,14 +761,14 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
 
           // 가스 카드들 그리드
           Padding(
-            padding: const EdgeInsets.all(16),
+            padding: const EdgeInsets.symmetric(horizontal: 16),
             child: GridView.count(
               shrinkWrap: true,
               physics: const NeverScrollableScrollPhysics(),
-              crossAxisCount: 2,
+              crossAxisCount: 4,
               crossAxisSpacing: 12,
               mainAxisSpacing: 12,
-              childAspectRatio: 1.2,
+              childAspectRatio: 0.6,
               children: [
                 _buildGasCard('CO', gasData['CO'] ?? '--'),
                 _buildGasCard('O2', gasData['O2'] ?? '--'),
@@ -538,6 +873,18 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
         break;
     }
 
+    // Create display text with proper chemical subscripts
+    String displayText = gasType;
+    if (gasType.toLowerCase() == 'co2') {
+      displayText = 'CO₂';
+    } else if (gasType.toLowerCase() == 'h2s') {
+      displayText = 'H₂S';
+    } else if (gasType.toLowerCase() == 'o2') {
+      displayText = 'O₂';
+    } else if (gasType.toLowerCase() == 'co') {
+      displayText = 'CO';
+    }
+
     return Container(
       decoration: BoxDecoration(
         color: cardColor,
@@ -550,218 +897,45 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
           ),
         ],
       ),
-      padding: const EdgeInsets.all(12),
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-        children: [
-          // 가스 타입과 정상 범위
-          Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  Text(
-                    gasType,
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontWeight: FontWeight.bold,
-                      fontSize: 16,
-                    ),
-                  ),
-                  if (gasType == 'O2')
-                    const Text(
-                      '₂',
-                      style: TextStyle(
-                        color: Colors.white,
-                        fontWeight: FontWeight.bold,
-                        fontSize: 12,
-                      ),
-                    ),
-                  if (gasType == 'H2S')
-                    const Text(
-                      '₂S',
-                      style: TextStyle(
-                        color: Colors.white,
-                        fontWeight: FontWeight.bold,
-                        fontSize: 12,
-                      ),
-                    ),
-                  if (gasType == 'CO2')
-                    const Text(
-                      '₂',
-                      style: TextStyle(
-                        color: Colors.white,
-                        fontWeight: FontWeight.bold,
-                        fontSize: 12,
-                      ),
-                    ),
-                ],
+      padding: const EdgeInsets.all(8),
+      child: Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              displayText,
+              style: const TextStyle(
+                color: Colors.white,
+                fontWeight: FontWeight.bold,
+                fontSize: 16,
               ),
-              if (threshold != null)
-                Text(
-                  '정상: ${threshold['normal_min']}~${threshold['normal_max']} ${threshold['unit']}',
-                  style: const TextStyle(color: Colors.white70, fontSize: 10),
-                ),
-            ],
-          ),
-
-          // 큰 실선 표시
-          Container(
-            width: double.infinity,
-            height: 4,
-            decoration: BoxDecoration(
-              color: Colors.white,
-              borderRadius: BorderRadius.circular(2),
             ),
-          ),
-
-          // 값과 단위
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              Text(
-                gasValue == '--' ? '--' : gasValue,
-                style: const TextStyle(
-                  color: Colors.white,
-                  fontWeight: FontWeight.bold,
-                  fontSize: 20,
-                ),
+            const SizedBox(height: 4),
+            // Gas value
+            Text(
+              gasValue,
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 20,
+                fontWeight: FontWeight.w600,
               ),
-              Text(
-                threshold?['unit'] ?? '',
-                style: const TextStyle(
-                  color: Colors.white,
-                  fontWeight: FontWeight.bold,
-                  fontSize: 16,
-                ),
+            ),
+            const SizedBox(height: 2),
+            // Unit below the value
+            Text(
+              threshold?['unit'] ?? '',
+              style: const TextStyle(
+                color: Colors.white70,
+                fontSize: 12,
+                fontWeight: FontWeight.w400,
               ),
-            ],
-          ),
-        ],
+            ),
+          ],
+        ),
       ),
     );
   }
-
-  Widget _buildSensorCard(SensorInfo sensor) {
-    final threshold = sensor.thresholdInfo;
-    final gasType = sensor.gasType;
-
-    return Container(
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: sensor.statusColor, width: 3),
-        boxShadow: [
-          BoxShadow(
-            color: sensor.statusColor.withOpacity(0.2),
-            blurRadius: 8,
-            offset: const Offset(0, 4),
-          ),
-        ],
-      ),
-      padding: const EdgeInsets.all(16),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          // 가스 타입과 아이콘
-          Row(
-            children: [
-              Container(
-                padding: const EdgeInsets.all(8),
-                decoration: BoxDecoration(
-                  color:
-                      threshold?['color']?.withOpacity(0.1) ??
-                      Colors.grey.withOpacity(0.1),
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: Icon(
-                  threshold?['icon'] ?? Icons.sensors,
-                  color: threshold?['color'] ?? Colors.grey,
-                  size: 24,
-                ),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      gasType,
-                      style: const TextStyle(
-                        fontSize: 18,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                    Text(
-                      sensor.portName,
-                      style: TextStyle(fontSize: 12, color: Colors.grey[600]),
-                    ),
-                  ],
-                ),
-              ),
-            ],
-          ),
-
-          const SizedBox(height: 16),
-
-          // 센서 값 표시
-          Center(
-            child: Column(
-              children: [
-                Text(
-                  sensor.dataWithUnit,
-                  style: TextStyle(
-                    fontSize: 32,
-                    fontWeight: FontWeight.bold,
-                    color: sensor.statusColor,
-                  ),
-                ),
-                const SizedBox(height: 4),
-                Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 8,
-                    vertical: 4,
-                  ),
-                  decoration: BoxDecoration(
-                    color: sensor.statusColor,
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                  child: Text(
-                    sensor.statusText,
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontWeight: FontWeight.bold,
-                      fontSize: 12,
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-
-          const Spacer(),
-
-          // 정상 범위 표시
-          if (threshold != null) ...[
-            const SizedBox(height: 8),
-            Text(
-              sensor.normalRangeText,
-              style: TextStyle(fontSize: 10, color: Colors.grey[600]),
-              textAlign: TextAlign.center,
-            ),
-          ],
-
-          // 업데이트 시간
-          Text(
-            '업데이트: ${sensor.lastUpdateTime}',
-            style: TextStyle(fontSize: 10, color: Colors.grey[500]),
-            textAlign: TextAlign.center,
-          ),
-        ],
-      ),
-    );
-  } // ------------------ 수동 재연결/설정 ------------------
 
   void _manualReconnect() {
     _isConnecting = false;
@@ -805,124 +979,15 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: Colors.grey[100],
-      appBar: AppBar(
-        backgroundColor: Theme.of(context).colorScheme.inversePrimary,
-        title: const Text('가스 모니터링 시스템'),
-        centerTitle: true,
-        elevation: 2,
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.refresh),
-            onPressed: _sensorsLoaded ? _reloadSensors : null,
-            tooltip: '센서 정보 새로고침',
-          ),
-          IconButton(
-            icon: const Icon(Icons.settings),
-            onPressed: _openSettings,
-            tooltip: '설정',
-          ),
-        ],
-      ),
       body: Column(
         children: [
-          // 연결 상태 표시
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.all(16),
-            margin: const EdgeInsets.all(16),
-            decoration: BoxDecoration(
-              color: _isWebSocketConnected ? Colors.green : Colors.red,
-              borderRadius: BorderRadius.circular(12),
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withOpacity(0.1),
-                  blurRadius: 4,
-                  offset: const Offset(0, 2),
-                ),
-              ],
-            ),
-            child: Row(
-              children: [
-                Icon(
-                  _isWebSocketConnected ? Icons.wifi : Icons.wifi_off,
-                  color: Colors.white,
-                  size: 24,
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        _isWebSocketConnected ? '실시간 모니터링 중' : '연결 끊김',
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontWeight: FontWeight.bold,
-                          fontSize: 16,
-                        ),
-                      ),
-                      Text(
-                        '$_serverIp:$_serverPort',
-                        style: const TextStyle(
-                          color: Colors.white70,
-                          fontSize: 12,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ],
+          Padding(
+            padding: const EdgeInsets.only(top: 40.0),
+            child: Text(
+              "가스 센서 모니터링 대시보드",
+              style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
             ),
           ),
-
-          // 알람 메시지 표시
-          if (_sensorGroupAlarms.values.any((alarm) => alarm.isNotEmpty)) ...[
-            Container(
-              width: double.infinity,
-              padding: const EdgeInsets.all(16),
-              margin: const EdgeInsets.symmetric(horizontal: 16),
-              decoration: BoxDecoration(
-                color: Colors.orange.shade100,
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(color: Colors.orange),
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Row(
-                    children: [
-                      Icon(Icons.warning, color: Colors.orange),
-                      SizedBox(width: 12),
-                      Text(
-                        '알람 메시지',
-                        style: TextStyle(
-                          fontWeight: FontWeight.bold,
-                          color: Colors.orange,
-                          fontSize: 16,
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 8),
-                  ..._sensorGroupAlarms.entries
-                      .where((entry) => entry.value.isNotEmpty)
-                      .map(
-                        (entry) => Padding(
-                          padding: const EdgeInsets.only(bottom: 4),
-                          child: Text(
-                            '• ${entry.value}',
-                            style: const TextStyle(
-                              color: Colors.orange,
-                              fontSize: 14,
-                            ),
-                          ),
-                        ),
-                      ),
-                ],
-              ),
-            ),
-            const SizedBox(height: 16),
-          ],
 
           // 센서 그룹 리스트
           Expanded(
@@ -933,7 +998,6 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
                       children: [
                         if (_sensorLoadError.isEmpty) ...[
                           const CircularProgressIndicator(),
-                          const SizedBox(height: 16),
                           const Text(
                             '센서 정보를 불러오는 중...',
                             style: TextStyle(fontSize: 16),
@@ -988,12 +1052,41 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
                 : Padding(
                     padding: const EdgeInsets.symmetric(horizontal: 16),
                     child: ListView.builder(
-                      itemCount: _sensors.length,
+                      itemCount: _sensors
+                          .where(
+                            (sensor) => !sensor.modelName
+                                .toLowerCase()
+                                .contains('error'),
+                          )
+                          .length,
                       itemBuilder: (context, index) {
-                        final sensor = _sensors[index];
+                        // Error가 포함된 센서 제외
+                        final validSensors = _sensors
+                            .where(
+                              (sensor) => !sensor.modelName
+                                  .toLowerCase()
+                                  .contains('error'),
+                            )
+                            .toList();
+
+                        if (index >= validSensors.length) return Container();
+
+                        final sensor = validSensors[index];
                         final sensorId =
                             '${sensor.modelName}_${sensor.portName}';
-                        return _buildSensorGroupCard(sensorId, sensor);
+
+                        // 센서 타입 판별
+                        final isLelSensor =
+                            sensor.modelName.toLowerCase().contains('lel') ||
+                            _lelSensors.containsKey(sensorId);
+
+                        if (isLelSensor) {
+                          // LEL 센서 카드 빌드
+                          return _buildLelSensorCard(sensorId, sensor);
+                        } else {
+                          // 복합가스센서 카드 빌드
+                          return _buildSensorGroupCard(sensorId, sensor);
+                        }
                       },
                     ),
                   ),
