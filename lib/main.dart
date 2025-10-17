@@ -58,7 +58,7 @@ class GasMonitoringPage extends StatefulWidget {
 
 class _GasMonitoringPageState extends State<GasMonitoringPage> {
   // ---- 서버 설정 ----
-  String _serverIp = '192.168.0.165';
+  String _serverIp = 'localhost';
   String _serverPort = '8081';
 
   // ---- 동적 센서 관리 ----

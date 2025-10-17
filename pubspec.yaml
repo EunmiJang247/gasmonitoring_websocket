@@ -37,6 +37,7 @@ dependencies:
   web_socket_channel: ^2.4.0
   stomp_dart_client: ^0.4.4
   http: ^1.1.0
+  msix: ^3.16.12
 
 dev_dependencies:
   flutter_test:
@@ -89,3 +90,11 @@ flutter:
   #
   # For details regarding fonts from package dependencies,
   # see https://flutter.dev/to/font-from-package
+
+msix_config:
+  display_name: MySensorApp
+  publisher_display_name: Jenny Dev
+  identity_name: com.jenny.mysensorapp
+  msix_version: 1.0.0.0
+  logo_path: windows\runner\resources\AppIcon.ico
+  capabilities: internetClient, usb
