@@ -5,35 +5,61 @@ class GasThresholds {
   static const Map<String, Map<String, dynamic>> thresholds = {
     'CO': {
       'normal_min': 0,
-      'normal_max': 25,
+      'normal_max': 30,
+      'warning_min': 30,
+      'warning_max': 200,
+      'danger_min': 200,
       'unit': 'ppm',
       'color': Colors.green,
       'icon': Icons.air,
     },
     'O2': {
-      'normal_min': 18,
-      'normal_max': 23.5,
+      'normal_min': 20,
+      'normal_max': 22,
+      'warning_min_low': 19.5,
+      'warning_max_low': 20,
+      'warning_min_high': 22,
+      'warning_max_high': 23.5,
+      'danger_max': 23.5,
+      'danger_min': 19.5,
       'unit': '%',
       'color': Colors.orange,
       'icon': Icons.bubble_chart,
     },
     'H2S': {
       'normal_min': 0,
-      'normal_max': 10,
+      'normal_max': 5,
+      'warning_min': 5,
+      'warning_max': 50,
+      'danger_min': 50,
       'unit': 'ppm',
       'color': Colors.green,
       'icon': Icons.warning,
     },
     'CO2': {
       'normal_min': 0,
-      'normal_max': 1000,
+      'normal_max': 1500,
+      'warning_min': 1500,
+      'warning_max': 5000,
+      'danger_min': 5000,
       'unit': 'ppm',
       'color': Colors.red,
       'icon': Icons.cloud,
     },
+    'LEL': {
+      'normal_min': 0,
+      'normal_max': 10,
+      'warning_min': 10,
+      'warning_max': 25,
+      'danger_min': 25,
+      'unit': '%',
+      'color': Colors.green,
+      'icon': Icons.local_fire_department,
+    },
   };
 
   static String getGasType(String modelName) {
+    if (modelName.contains('LEL')) return 'LEL';
     if (modelName.contains('CO2')) return 'CO2';
     if (modelName.contains('CO')) return 'CO';
     if (modelName.contains('O2')) return 'O2';
@@ -90,27 +116,62 @@ class SensorInfo {
     final numValue = double.tryParse(data);
     if (numValue == null) return SensorStatus.error;
 
-    final threshold = thresholdInfo;
-    if (threshold == null) return SensorStatus.error;
+    // 가스별 새로운 범위 기준으로 상태 계산
+    switch (gasType) {
+      case 'CO':
+        if (numValue >= 0 && numValue <= 30) return SensorStatus.normal;
+        if (numValue > 30 && numValue <= 200) return SensorStatus.warning;
+        if (numValue > 200) return SensorStatus.danger;
+        break;
 
-    final normalMin = threshold['normal_min'] as num;
-    final normalMax = threshold['normal_max'] as num;
+      case 'O2':
+        if (numValue >= 20 && numValue <= 22) return SensorStatus.normal;
+        if ((numValue >= 19.5 && numValue < 20) ||
+            (numValue > 22 && numValue <= 23.5)) {
+          return SensorStatus.warning;
+        }
+        if (numValue < 19.5 || numValue > 23.5) return SensorStatus.danger;
+        break;
 
-    // 정상 범위
-    if (numValue >= normalMin && numValue <= normalMax) {
-      return SensorStatus.normal;
+      case 'H2S':
+        if (numValue >= 0 && numValue <= 5) return SensorStatus.normal;
+        if (numValue > 5 && numValue <= 50) return SensorStatus.warning;
+        if (numValue > 50) return SensorStatus.danger;
+        break;
+
+      case 'CO2':
+        if (numValue >= 0 && numValue <= 1500) return SensorStatus.normal;
+        if (numValue > 1500 && numValue <= 5000) return SensorStatus.warning;
+        if (numValue > 5000) return SensorStatus.danger;
+        break;
+
+      default:
+        // 기본적으로 normal_min, normal_max 사용
+        final threshold = thresholdInfo;
+        if (threshold == null) return SensorStatus.error;
+
+        final normalMin = threshold['normal_min'] as num;
+        final normalMax = threshold['normal_max'] as num;
+
+        if (numValue >= normalMin && numValue <= normalMax) {
+          return SensorStatus.normal;
+        }
+
+        final warningMax = threshold['warning_max'] as num?;
+        final dangerMin = threshold['danger_min'] as num?;
+
+        if (warningMax != null && numValue <= warningMax) {
+          return SensorStatus.warning;
+        }
+
+        if (dangerMin != null && numValue > dangerMin) {
+          return SensorStatus.danger;
+        }
+
+        return SensorStatus.warning;
     }
 
-    // 경고 범위 (±20%)
-    final warningMinLow = normalMin * 0.8;
-    final warningMaxHigh = normalMax * 1.2;
-
-    if (numValue >= warningMinLow && numValue <= warningMaxHigh) {
-      return SensorStatus.warning;
-    }
-
-    // 위험 범위
-    return SensorStatus.danger;
+    return SensorStatus.error;
   }
 
   // 상태별 색상

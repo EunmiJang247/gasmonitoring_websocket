@@ -498,7 +498,7 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
         {'lel': '--', 'temperature': '--', 'humidity': '--', 'gasId': '--'};
     final alarmMessage = _sensorGroupAlarms[sensorId] ?? '';
 
-    // LEL 값으로 상태 계산 (0-10% 정상 범위)
+    // LEL 값으로 상태 계산 (새로운 범위 적용)
     final lelValue = lelData['lel'] ?? '--';
     Color statusColor = Colors.green;
     String statusText = '정상';
@@ -506,13 +506,16 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
     if (lelValue != '--' && lelValue.isNotEmpty) {
       final numValue = double.tryParse(lelValue);
       if (numValue != null) {
-        if (numValue > 10) {
+        if (numValue > 25) {
+          // 위험 범위: 25% 초과
           statusColor = Colors.red;
           statusText = '위험';
-        } else if (numValue > 8) {
+        } else if (numValue > 10) {
+          // 경고 범위: 10~25%
           statusColor = Colors.orange;
           statusText = '경고';
         } else {
+          // 정상 범위: 0~10%
           statusColor = Colors.green;
           statusText = '정상';
         }
@@ -609,9 +612,7 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
                       Text(
-                        lelData['humidity'] == '--'
-                            ? '--'
-                            : '${lelData['humidity']}',
+                        lelData['lel'] == '--' ? '--' : '${lelData['lel']}',
 
                         style: const TextStyle(
                           color: Colors.white,
@@ -836,21 +837,45 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
     final normalMin = threshold['normal_min'] as num;
     final normalMax = threshold['normal_max'] as num;
 
-    // 정상 범위
+    // 정상 범위 확인
     if (numValue >= normalMin && numValue <= normalMax) {
       return SensorStatus.normal;
     }
 
-    // 경고 범위 (±20%)
-    final warningMinLow = normalMin * 0.8;
-    final warningMaxHigh = normalMax * 1.2;
+    // O2는 특별한 처리 필요 (위/아래 둘 다 경고/위험 범위)
+    if (gasType.toLowerCase() == 'o2') {
+      // 위험 범위: 23.5 초과 또는 19.5 미만
+      if (numValue > 23.5 || numValue < 19.5) {
+        return SensorStatus.danger;
+      }
+      // 경고 범위: 22~23.5 또는 19.5~20
+      if ((numValue > 22 && numValue <= 23.5) ||
+          (numValue >= 19.5 && numValue < 20)) {
+        return SensorStatus.warning;
+      }
+      return SensorStatus.normal;
+    }
 
-    if (numValue >= warningMinLow && numValue <= warningMaxHigh) {
+    // 다른 가스들 (CO, H2S, CO2, LEL)
+    final warningMin = threshold['warning_min'] as num?;
+    final warningMax = threshold['warning_max'] as num?;
+    final dangerMin = threshold['danger_min'] as num?;
+
+    // 위험 범위 확인
+    if (dangerMin != null && numValue > dangerMin) {
+      return SensorStatus.danger;
+    }
+
+    // 경고 범위 확인
+    if (warningMin != null &&
+        warningMax != null &&
+        numValue > warningMin &&
+        numValue <= warningMax) {
       return SensorStatus.warning;
     }
 
-    // 위험 범위
-    return SensorStatus.danger;
+    // 정상 범위를 벗어났지만 경고/위험에 해당하지 않는 경우
+    return SensorStatus.warning;
   }
 
   Widget _buildGasCard(String gasType, String gasValue) {
