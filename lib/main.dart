@@ -598,6 +598,41 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
     }
   }
 
+  // ------------------ 전체 센서 상태 확인 ------------------
+
+  // 전체 센서 중 위험 상태가 있는지 확인
+  bool _hasAnySensorInDanger() {
+    // 복합가스센서들 확인
+    for (final entry in _sensorGroups.entries) {
+      final gasData = entry.value;
+      for (final gasEntry in gasData.entries) {
+        final gasType = gasEntry.key;
+        final gasValue = gasEntry.value;
+        if (gasValue != '--' && gasValue.isNotEmpty) {
+          final status = _calculateGasStatus(gasType, gasValue);
+          if (status == SensorStatus.danger) {
+            return true;
+          }
+        }
+      }
+    }
+
+    // LEL센서들 확인
+    for (final entry in _lelSensors.entries) {
+      final lelData = entry.value;
+      final lelValue = lelData['lel'] ?? '--';
+      if (lelValue != '--' && lelValue.isNotEmpty) {
+        final numValue = double.tryParse(lelValue);
+        if (numValue != null && numValue > 25) {
+          // LEL 위험 범위: 25% 초과
+          return true;
+        }
+      }
+    }
+
+    return false;
+  }
+
   // ------------------ UI 빌더 메서드 ------------------
   Widget _buildLelSensorCard(String sensorId, SensorInfo sensor) {
     final lelData =
@@ -1107,6 +1142,42 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
                   style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
                 ),
                 const SizedBox(height: 8),
+
+                // 위험 경고 표시
+                if (_hasAnySensorInDanger())
+                  Container(
+                    margin: const EdgeInsets.only(bottom: 12),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 16,
+                      vertical: 8,
+                    ),
+                    decoration: BoxDecoration(
+                      color: Colors.red.withOpacity(0.9),
+                      borderRadius: BorderRadius.circular(8),
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.red.withOpacity(0.3),
+                          blurRadius: 8,
+                          offset: const Offset(0, 2),
+                        ),
+                      ],
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: const [
+                        Icon(Icons.warning, color: Colors.white, size: 20),
+                        SizedBox(width: 8),
+                        Text(
+                          "경고: 위험 상태의 센서가 감지되었습니다!",
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 16,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
 
                 // 연결 상태 표시
                 Container(

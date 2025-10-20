@@ -42,6 +42,10 @@ class GasThresholds {
       'warning_min': 1500,
       'warning_max': 5000,
       'danger_min': 5000,
+      // 'normal_max': 500,
+      // 'warning_min': 500,
+      // 'warning_max': 750,
+      // 'danger_min': 750,
       'unit': 'ppm',
       'color': Colors.red,
       'icon': Icons.cloud,
@@ -109,69 +113,59 @@ class SensorInfo {
   // 임계값 정보 가져오기
   Map<String, dynamic>? get thresholdInfo => GasThresholds.thresholds[gasType];
 
-  // 현재 센서 상태 계산
+  // 현재 센서 상태 계산 - GasThresholds 사용하여 통일
   SensorStatus get status {
     if (data == '--' || data.isEmpty) return SensorStatus.error;
 
     final numValue = double.tryParse(data);
     if (numValue == null) return SensorStatus.error;
 
-    // 가스별 새로운 범위 기준으로 상태 계산
-    switch (gasType) {
-      case 'CO':
-        if (numValue >= 0 && numValue <= 30) return SensorStatus.normal;
-        if (numValue > 30 && numValue <= 200) return SensorStatus.warning;
-        if (numValue > 200) return SensorStatus.danger;
-        break;
+    // GasThresholds를 사용하여 임계치 통일 관리
+    final threshold = GasThresholds.thresholds[gasType];
+    if (threshold == null) return SensorStatus.error;
 
-      case 'O2':
-        if (numValue >= 20 && numValue <= 22) return SensorStatus.normal;
-        if ((numValue >= 19.5 && numValue < 20) ||
-            (numValue > 22 && numValue <= 23.5)) {
-          return SensorStatus.warning;
-        }
-        if (numValue < 19.5 || numValue > 23.5) return SensorStatus.danger;
-        break;
+    final normalMin = threshold['normal_min'] as num;
+    final normalMax = threshold['normal_max'] as num;
 
-      case 'H2S':
-        if (numValue >= 0 && numValue <= 5) return SensorStatus.normal;
-        if (numValue > 5 && numValue <= 50) return SensorStatus.warning;
-        if (numValue > 50) return SensorStatus.danger;
-        break;
-
-      case 'CO2':
-        if (numValue >= 0 && numValue <= 1500) return SensorStatus.normal;
-        if (numValue > 1500 && numValue <= 5000) return SensorStatus.warning;
-        if (numValue > 5000) return SensorStatus.danger;
-        break;
-
-      default:
-        // 기본적으로 normal_min, normal_max 사용
-        final threshold = thresholdInfo;
-        if (threshold == null) return SensorStatus.error;
-
-        final normalMin = threshold['normal_min'] as num;
-        final normalMax = threshold['normal_max'] as num;
-
-        if (numValue >= normalMin && numValue <= normalMax) {
-          return SensorStatus.normal;
-        }
-
-        final warningMax = threshold['warning_max'] as num?;
-        final dangerMin = threshold['danger_min'] as num?;
-
-        if (warningMax != null && numValue <= warningMax) {
-          return SensorStatus.warning;
-        }
-
-        if (dangerMin != null && numValue > dangerMin) {
-          return SensorStatus.danger;
-        }
-
-        return SensorStatus.warning;
+    // 정상 범위 확인
+    if (numValue >= normalMin && numValue <= normalMax) {
+      return SensorStatus.normal;
     }
 
-    return SensorStatus.error;
+    // O2는 특별한 처리 필요 (위/아래 둘 다 경고/위험 범위)
+    if (gasType.toLowerCase() == 'o2') {
+      // 위험 범위: 23.5 초과 또는 19.5 미만
+      if (numValue > 23.5 || numValue < 19.5) {
+        return SensorStatus.danger;
+      }
+      // 경고 범위: 22~23.5 또는 19.5~20
+      if ((numValue > 22 && numValue <= 23.5) ||
+          (numValue >= 19.5 && numValue < 20)) {
+        return SensorStatus.warning;
+      }
+      return SensorStatus.normal;
+    }
+
+    // 다른 가스들 (CO, H2S, CO2, LEL)
+    final warningMin = threshold['warning_min'] as num?;
+    final warningMax = threshold['warning_max'] as num?;
+    final dangerMin = threshold['danger_min'] as num?;
+
+    // 위험 범위 확인
+    if (dangerMin != null && numValue > dangerMin) {
+      return SensorStatus.danger;
+    }
+
+    // 경고 범위 확인
+    if (warningMin != null &&
+        warningMax != null &&
+        numValue > warningMin &&
+        numValue <= warningMax) {
+      return SensorStatus.warning;
+    }
+
+    // 정상 범위를 벗어났지만 경고/위험에 해당하지 않는 경우
+    return SensorStatus.warning;
   }
 
   // 상태별 색상
