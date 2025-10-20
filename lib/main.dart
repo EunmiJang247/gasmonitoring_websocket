@@ -75,6 +75,7 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
   // ---- UI 상태 ----
   String _connectionStatus = '센서 정보 로딩중...';
   bool _isWebSocketConnected = false;
+  Map<String, int> _resubscriptionAttempts = {}; // 센서별 재구독 시도 횟수
 
   // ---- 개별 센서 구독 상태 추적 ----
   Map<String, DateTime> _lastDataReceived = {}; // 센서별 마지막 데이터 수신 시간
@@ -94,6 +95,10 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
   String get _wsUrl => 'ws://$_serverIp:$_serverPort/ws/sensor';
   String get _apiUrl => 'http://$_serverIp:$_serverPort/api/sensor/mappings';
 
+  bool _isLoadingSensors = false; // 플래그 추가
+  bool _isReconnecting = false; // 재연결 플래그 추가
+  bool _isResubscribing = false;
+
   @override
   void initState() {
     super.initState();
@@ -105,6 +110,7 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
     _heartbeatTicker?.cancel();
     _retryTimer?.cancel();
     _subscriptionHealthChecker?.cancel();
+    _resubscriptionAttempts.clear(); // 추가
     _stomp?.deactivate();
     super.dispose();
   }
@@ -116,6 +122,13 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
       _sensorsLoaded = false;
       _sensorLoadError = '';
     });
+
+    if (_isLoadingSensors) {
+      print('이미 센서 로딩 중 - 중복 요청 방지');
+      return;
+    }
+
+    _isLoadingSensors = true;
 
     try {
       print('=== 센서 정보 로딩 시작 ===');
@@ -195,6 +208,8 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
       });
       print('ERROR: 센서 로딩 실패 - $e');
       print('=== 센서 정보 로딩 실패 ===\n');
+    } finally {
+      _isLoadingSensors = false; // 항상 플래그 해제
     }
   }
 
@@ -207,7 +222,11 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
     _createAndActivateClient();
   }
 
+  bool _isWebSocketConnecting = false;
+
   void _createAndActivateClient() {
+    if (_isWebSocketConnecting) return;
+    _isWebSocketConnecting = true;
     _stomp?.deactivate(); // 1. 기존 연결 완전히 해제
 
     final config = StompConfig(
@@ -228,6 +247,7 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
   }
 
   void _onConnect(StompFrame frame) {
+    _isWebSocketConnecting = false;
     _isConnecting = false;
     _retryTimer?.cancel();
 
@@ -358,38 +378,50 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
 
   // 실패한 센서들만 재구독
   void _resubscribeFailedSensors() {
-    if (!_isWebSocketConnected) {
-      print('WebSocket 연결이 없어 개별 재구독 불가');
+    if (_isResubscribing) {
+      print('이미 재구독 중 - 중복 방지');
       return;
     }
 
-    final now = DateTime.now();
-    List<int> failedSensorIndexes = [];
+    _isResubscribing = true;
 
-    // 30초 이상 데이터 안 온 센서들 찾기
-    for (int i = 0; i < _sensors.length; i++) {
-      final sensor = _sensors[i];
-      final sensorId = '${sensor.modelName}_${sensor.portName}';
-      final lastReceived = _lastDataReceived[sensorId];
-
-      // 30초 이상 데이터 안 오면 구독 문제로 판단
-      if (lastReceived == null || now.difference(lastReceived).inSeconds > 30) {
-        failedSensorIndexes.add(i);
-        _subscriptionActive[sensorId] = false;
-      }
-    }
-
-    if (failedSensorIndexes.isNotEmpty) {
-      print('실패한 센서 ${failedSensorIndexes.length}개 재구독 시작');
-      for (int index in failedSensorIndexes) {
-        _resubscribeSingleSensor(index);
+    try {
+      if (!_isWebSocketConnected) {
+        print('WebSocket 연결이 없어 개별 재구독 불가');
+        return;
       }
 
-      setState(() {
-        _connectionStatus = '${failedSensorIndexes.length}개 센서 재구독 시도';
-      });
-    } else {
-      print('모든 센서 구독 정상');
+      final now = DateTime.now();
+      List<int> failedSensorIndexes = [];
+
+      // 30초 이상 데이터 안 온 센서들 찾기
+      for (int i = 0; i < _sensors.length; i++) {
+        final sensor = _sensors[i];
+        final sensorId = '${sensor.modelName}_${sensor.portName}';
+        final lastReceived = _lastDataReceived[sensorId];
+
+        // 30초 이상 데이터 안 오면 구독 문제로 판단
+        if (lastReceived == null ||
+            now.difference(lastReceived).inSeconds > 30) {
+          failedSensorIndexes.add(i);
+          _subscriptionActive[sensorId] = false;
+        }
+      }
+
+      if (failedSensorIndexes.isNotEmpty) {
+        print('실패한 센서 ${failedSensorIndexes.length}개 재구독 시작');
+        for (int index in failedSensorIndexes) {
+          _resubscribeSingleSensor(index);
+        }
+
+        setState(() {
+          _connectionStatus = '${failedSensorIndexes.length}개 센서 재구독 시도';
+        });
+      } else {
+        print('모든 센서 구독 정상');
+      }
+    } finally {
+      _isResubscribing = false;
     }
   }
 
@@ -423,8 +455,81 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
 
     if (problemSensors.isNotEmpty) {
       print('구독 문제 센서 발견: ${problemSensors.join(', ')}');
-      _resubscribeFailedSensors();
+
+      // 각 문제 센서의 재구독 시도 횟수 확인
+      bool shouldFullReconnect = false;
+
+      for (final sensor in _sensors) {
+        final sensorId = '${sensor.modelName}_${sensor.portName}';
+        final lastReceived = _lastDataReceived[sensorId];
+
+        if (lastReceived == null ||
+            now.difference(lastReceived).inSeconds > 30) {
+          // 재구독 시도 횟수 증가
+          _resubscriptionAttempts[sensorId] =
+              (_resubscriptionAttempts[sensorId] ?? 0) + 1;
+
+          print('센서 $sensorId 재구독 시도 ${_resubscriptionAttempts[sensorId]}회');
+
+          // 2번 초과시 전체 재연결 플래그 설정
+          if (_resubscriptionAttempts[sensorId]! > 2) {
+            print('센서 $sensorId: 2번 재구독 실패 → 전체 WebSocket 재연결 필요');
+            shouldFullReconnect = true;
+          }
+        }
+      }
+
+      if (shouldFullReconnect) {
+        // 전체 WebSocket 재연결
+        print('2번 이상 재구독 실패 센서 발견 → 전체 재연결 시작');
+        _fullReconnectDueToFailure();
+      } else {
+        // 아직 2번 이하면 개별 재구독 시도
+        _resubscribeFailedSensors();
+      }
     }
+  }
+
+  // _checkSubscriptionHealth 함수 뒤에 추가
+  void _fullReconnectDueToFailure() {
+    if (_isReconnecting) {
+      print('이미 재연결 중 - 중복 방지');
+      return;
+    }
+
+    _isReconnecting = true;
+
+    print('=== 센서 문제로 인한 전체 재연결 시작 ===');
+
+    setState(() {
+      _connectionStatus = '센서 연결 문제로 전체 재연결중...';
+    });
+
+    // 재구독 시도 횟수 초기화
+    _resubscriptionAttempts.clear();
+
+    // 헬스체크 중단
+    _subscriptionHealthChecker?.cancel();
+
+    // WebSocket 완전 끊기
+    _stomp?.deactivate();
+
+    // 센서 데이터 초기화
+    _sensorGroups.clear();
+    _lelSensors.clear();
+    _lastDataReceived.clear();
+    _subscriptionActive.clear();
+
+    setState(() {
+      _isWebSocketConnected = false;
+    });
+
+    // 3초 후 센서 정보부터 다시 로딩
+    Timer(const Duration(seconds: 3), () {
+      _loadSensors().then((_) {
+        _isReconnecting = false; // ← 플래그 해제 추가
+      });
+    });
   }
 
   void _scheduleRetry() {
@@ -449,6 +554,9 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
     // 센서별 데이터 수신 시간 기록 (개별 구독 상태 추적)
     _lastDataReceived[sensorId] = DateTime.now();
     _subscriptionActive[sensorId] = true;
+
+    // 데이터 수신 성공시 재구독 시도 횟수 리셋
+    _resubscriptionAttempts[sensorId] = 0;
 
     // 원본 데이터 출력
     logMessage('=== 웹소켓 데이터 수신 ===', name: 'WebSocket');
@@ -1168,6 +1276,12 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
   }
 
   void _manualReconnect() {
+    if (_isReconnecting) {
+      print('이미 재연결 중 - 중복 방지');
+      return;
+    }
+    _isReconnecting = true;
+
     _isConnecting = false;
     _retryTimer?.cancel();
     _heartbeatTicker?.cancel();
@@ -1178,7 +1292,9 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
       _connectionStatus = '재연결 시도중...';
     });
 
-    _loadSensors(); // 센서 정보부터 다시 로딩
+    _loadSensors().then((_) {
+      _isReconnecting = false; // ← 플래그 해제 추가
+    });
   }
 
   void _reloadSensors() async {
