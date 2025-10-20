@@ -80,11 +80,9 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
   StompClient? _stomp;
   StreamSubscription? _heartbeatTicker;
   Timer? _retryTimer;
-  bool _usingSockJS = false;
   bool _isConnecting = false;
 
   String get _wsUrl => 'ws://$_serverIp:$_serverPort/ws/sensor';
-  String get _httpSockUrl => 'http://$_serverIp:$_serverPort/ws/sensor';
   String get _apiUrl => 'http://$_serverIp:$_serverPort/api/sensor/mappings';
 
   @override
@@ -139,6 +137,9 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
           setState(() {
             _sensors = sensorsJson
                 .map((json) => SensorInfo.fromJson(json))
+                .where(
+                  (sensor) => !sensor.modelName.toLowerCase().contains('error'),
+                )
                 .toList();
             _sensorsLoaded = true;
             _connectionStatus = '센서 ${_sensors.length}개 로딩 완료';
@@ -192,45 +193,27 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
     _isConnecting = true;
     setState(() => _connectionStatus = 'WebSocket 연결중...');
 
-    _usingSockJS = false; // 순수 WS 우선
-    _createAndActivateClient(sockJs: false);
+    _createAndActivateClient();
   }
 
-  void _createAndActivateClient({required bool sockJs}) {
-    _stomp?.deactivate();
+  void _createAndActivateClient() {
+    _stomp?.deactivate(); // 1. 기존 연결 완전히 해제
 
-    final url = sockJs ? _httpSockUrl : _wsUrl;
+    final config = StompConfig(
+      // 2. 새로운 STOMP 설정 생성
+      url: _wsUrl, // WebSocket URL
+      onConnect: _onConnect, // 연결 성공 콜백
+      onStompError: _onStompError,
+      onWebSocketError: _onWsError,
+      onWebSocketDone: _onWsDone,
+      reconnectDelay: const Duration(seconds: 3),
+      heartbeatIncoming: const Duration(seconds: 10),
+      heartbeatOutgoing: const Duration(seconds: 10),
+      webSocketConnectHeaders: const {'Sec-WebSocket-Protocol': 'v12.stomp'},
+    );
 
-    final config = sockJs
-        ? StompConfig.SockJS(
-            url: url,
-            onConnect: _onConnect,
-            onStompError: _onStompError,
-            onWebSocketError: (e) => _onWsError(e, sockJs: true),
-            onWebSocketDone: _onWsDone,
-            reconnectDelay: const Duration(seconds: 3),
-            heartbeatIncoming: const Duration(seconds: 10),
-            heartbeatOutgoing: const Duration(seconds: 10),
-            // stompConnectHeaders: const {'login': 'user', 'passcode': 'secret'},
-          )
-        : StompConfig(
-            url: url,
-            onConnect: _onConnect,
-            onStompError: _onStompError,
-            onWebSocketError: (e) => _onWsError(e, sockJs: false),
-            onWebSocketDone: _onWsDone,
-            reconnectDelay: const Duration(seconds: 3),
-            heartbeatIncoming: const Duration(seconds: 10),
-            heartbeatOutgoing: const Duration(seconds: 10),
-            // 일부 서버는 STOMP 서브프로토콜 명시 필요
-            webSocketConnectHeaders: const {
-              'Sec-WebSocket-Protocol': 'v12.stomp',
-            },
-            // stompConnectHeaders: const {'login': 'user', 'passcode': 'secret'},
-          );
-
-    _stomp = StompClient(config: config);
-    _stomp!.activate();
+    _stomp = StompClient(config: config); // 3. 새로운 클라이언트 생성
+    _stomp!.activate(); // 4. WebSocket 연결 시작
   }
 
   void _onConnect(StompFrame frame) {
@@ -238,14 +221,13 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
     _retryTimer?.cancel();
 
     print('=== 웹소켓 연결 성공 ===');
-    print('연결 타입: ${_usingSockJS ? "SockJS" : "순수 WebSocket"}');
     print('서버: $_serverIp:$_serverPort');
     print('프레임 헤더: ${frame.headers}');
     print('프레임 바디: ${frame.body}');
 
     setState(() {
       _isWebSocketConnected = true;
-      _connectionStatus = 'WebSocket 연결됨 (${_usingSockJS ? "SockJS" : "WS"})';
+      _connectionStatus = 'WebSocket 연결됨';
     });
 
     // ✅ 모든 센서들을 구독
@@ -259,6 +241,7 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
       print('  - 시리얼: ${sensor.serialNumber}');
 
       _stomp?.subscribe(
+        // ← 구독도 자동으로 다시 시작
         destination: sensor.topicPath,
         headers: const {'ack': 'auto'},
         callback: (msg) {
@@ -273,6 +256,8 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
 
     _heartbeatTicker?.cancel();
     _heartbeatTicker = Stream.periodic(const Duration(seconds: 15)).listen((_) {
+      // 15초마다 로그를 출력해서 연결이 유지되고 있음을 확인
+      // 구독이 존재하는한 15초마다 한번씩 실행됨
       print(
         '[HEARTBEAT] ${DateTime.now().toString().substring(11, 19)} - 연결 유지 중',
       );
@@ -286,53 +271,61 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
   }
 
   void _onStompError(StompFrame frame) {
+    // WebSocket은 연결되었지만 STOMP 프로토콜에서 서버가 ERROR 프레임을 보낼 때
     _isConnecting = false;
+    _heartbeatTicker?.cancel();
     setState(() {
       _isWebSocketConnected = false;
       _connectionStatus = 'STOMP 오류: ${frame.body ?? frame.headers.toString()}';
     });
-    _scheduleRetryOrFallback();
   }
 
-  void _onWsError(Object error, {required bool sockJs}) {
-    debugPrint('WS error(${sockJs ? "sockjs" : "ws"}): $error');
+  void _onWsError(dynamic error, [dynamic frame]) {
+    // 발생시점
+    // 1. 서버가 꺼져있음 → _onWsError 발생
+    // 2. 네트워크 연결 불가 → _onWsError 발생
+    // 3. 방화벽 차단 → _onWsError 발생
+    // 4. WebSocket 핸드셰이크 실패 → _onWsError 발생
+    // 5. 연결 중간에 끊어짐 → _onWsError 발생
+
+    debugPrint('WebSocket error: $error');
+    _heartbeatTicker?.cancel();
     setState(() {
       _isWebSocketConnected = false;
       _connectionStatus = '연결 오류: $error';
     });
-
-    if (!sockJs) {
-      // 순수 WS 실패 → SockJS로 폴백
-      _usingSockJS = true;
-      _retryTimer?.cancel();
-      _retryTimer = Timer(const Duration(milliseconds: 500), () {
-        setState(() => _connectionStatus = 'WS 실패 → SockJS 재시도...');
-        _createAndActivateClient(sockJs: true);
-      });
-    } else {
-      _scheduleRetryOrFallback();
-    }
+    _scheduleRetry();
   }
 
   void _onWsDone() {
-    debugPrint('WS done/closed');
+    // 발생시점
+    // 1. 서버가 정상적으로 연결 종료
+    // 2. 클라이언트가 deactivate() 호출
+    // 3. 프로토콜에 따른 정상 종료
+    // 4. 타임아웃으로 인한 정상 종료
+
+    debugPrint('WebSocket closed');
+    _heartbeatTicker?.cancel();
     setState(() {
       _isWebSocketConnected = false;
       _connectionStatus = '연결 끊어짐';
     });
-    _scheduleRetryOrFallback();
+    _scheduleRetry();
   }
 
-  void _scheduleRetryOrFallback() {
+  void _scheduleRetry() {
+    // WebSocket 연결을 다시 하는 것(구독까지 포함된 전체 연결을 다시 시도)
     _retryTimer?.cancel();
     _retryTimer = Timer(const Duration(seconds: 3), () {
       setState(() => _connectionStatus = '재연결 시도중...');
-      _createAndActivateClient(sockJs: _usingSockJS);
+      _createAndActivateClient();
     });
   }
 
   // ------------------ 메시지 처리 ------------------
   void _updateSensor(int sensorIndex, String? body) {
+    // WebSocket에서 수신한 센서 데이터를 처리하고 UI 상태를 업데이트하는 핵심 함수
+
     if (body == null || body.isEmpty || sensorIndex >= _sensors.length) return;
 
     final nowStr = DateTime.now().toString().substring(11, 19);
@@ -350,7 +343,7 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
       // JSON 파싱
       final dynamic data = jsonDecode(body);
       logMessage('파싱된 JSON: $data', name: 'ParsedData');
-      logMessage('JSON 타입: ${data.runtimeType}', name: 'ParsedData');
+      // 파싱된 JSON:  {alarmResult: {alarmLevel: NORMAL, messages: [정상]}, co: 3, o2: 20.37, h2s: 0, co2: 1013}
 
       if (data is Map<String, dynamic>) {
         logMessage('--- 가스 데이터 ---', name: 'GasData');
@@ -414,36 +407,36 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
             }
 
             // 각 가스 데이터 업데이트
-            if (data.containsKey('co')) {
-              final oldValue = _sensorGroups[sensorId]!['CO'];
-              final newValue = data['co']?.toString() ?? '--';
-              _sensorGroups[sensorId]!['CO'] = newValue;
-              logMessage('CO 업데이트: $oldValue → $newValue', name: 'GasUpdate');
-            }
-            if (data.containsKey('o2')) {
-              final oldValue = _sensorGroups[sensorId]!['O2'];
-              final newValue = data['o2']?.toString() ?? '--';
-              _sensorGroups[sensorId]!['O2'] = newValue;
-              logMessage('O2 업데이트: $oldValue → $newValue', name: 'GasUpdate');
-            }
-            if (data.containsKey('h2s')) {
-              final oldValue = _sensorGroups[sensorId]!['H2S'];
-              final newValue = data['h2s']?.toString() ?? '--';
-              _sensorGroups[sensorId]!['H2S'] = newValue;
-              logMessage('H2S 업데이트: $oldValue → $newValue', name: 'GasUpdate');
-            }
-            if (data.containsKey('co2')) {
-              final oldValue = _sensorGroups[sensorId]!['CO2'];
-              final newValue = data['co2']?.toString() ?? '--';
-              _sensorGroups[sensorId]!['CO2'] = newValue;
-              logMessage('CO2 업데이트: $oldValue → $newValue', name: 'GasUpdate');
-            }
+            // if (data.containsKey('co')) {
+            //   final oldValue = _sensorGroups[sensorId]!['CO'];
+            //   final newValue = data['co']?.toString() ?? '--';
+            //   _sensorGroups[sensorId]!['CO'] = newValue;
+            //   logMessage('CO 업데이트: $oldValue → $newValue', name: 'GasUpdate');
+            // }
+            // if (data.containsKey('o2')) {
+            //   final oldValue = _sensorGroups[sensorId]!['O2'];
+            //   final newValue = data['o2']?.toString() ?? '--';
+            //   _sensorGroups[sensorId]!['O2'] = newValue;
+            //   logMessage('O2 업데이트: $oldValue → $newValue', name: 'GasUpdate');
+            // }
+            // if (data.containsKey('h2s')) {
+            //   final oldValue = _sensorGroups[sensorId]!['H2S'];
+            //   final newValue = data['h2s']?.toString() ?? '--';
+            //   _sensorGroups[sensorId]!['H2S'] = newValue;
+            //   logMessage('H2S 업데이트: $oldValue → $newValue', name: 'GasUpdate');
+            // }
+            // if (data.containsKey('co2')) {
+            //   final oldValue = _sensorGroups[sensorId]!['CO2'];
+            //   final newValue = data['co2']?.toString() ?? '--';
+            //   _sensorGroups[sensorId]!['CO2'] = newValue;
+            //   logMessage('CO2 업데이트: $oldValue → $newValue', name: 'GasUpdate');
+            // }
           }
 
           // 알람 메시지 처리
           if (data.containsKey('alarmResult') && data['alarmResult'] is Map) {
             final alarmResult = data['alarmResult'] as Map<String, dynamic>;
-            print('알람 결과: $alarmResult');
+            // print('알람 결과: $alarmResult');
             if (alarmResult.containsKey('messages') &&
                 alarmResult['messages'] is List) {
               final messages = alarmResult['messages'] as List;
@@ -992,10 +985,57 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
       body: Column(
         children: [
           Padding(
-            padding: const EdgeInsets.only(top: 40.0),
-            child: Text(
-              "가스 센서 모니터링 대시보드",
-              style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
+            padding: const EdgeInsets.only(top: 40.0, bottom: 16.0),
+            child: Column(
+              children: [
+                const Text(
+                  "가스 센서 모니터링 대시보드",
+                  style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
+                ),
+                const SizedBox(height: 8),
+
+                // 연결 상태 표시
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 6,
+                  ),
+                  decoration: BoxDecoration(
+                    color: _isWebSocketConnected
+                        ? Colors.green.withOpacity(0.1)
+                        : Colors.orange.withOpacity(0.1),
+                    borderRadius: BorderRadius.circular(20),
+                    border: Border.all(
+                      color: _isWebSocketConnected
+                          ? Colors.green
+                          : Colors.orange,
+                      width: 1,
+                    ),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(
+                        _isWebSocketConnected ? Icons.wifi : Icons.wifi_find,
+                        size: 16,
+                        color: _isWebSocketConnected
+                            ? Colors.green
+                            : Colors.orange,
+                      ),
+                      const SizedBox(width: 4),
+                      Text(
+                        _connectionStatus,
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: _isWebSocketConnected
+                              ? Colors.green
+                              : Colors.orange,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
             ),
           ),
 
@@ -1062,26 +1102,11 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
                 : Padding(
                     padding: const EdgeInsets.symmetric(horizontal: 16),
                     child: ListView.builder(
-                      itemCount: _sensors
-                          .where(
-                            (sensor) => !sensor.modelName
-                                .toLowerCase()
-                                .contains('error'),
-                          )
-                          .length,
+                      itemCount: _sensors.length,
                       itemBuilder: (context, index) {
-                        // Error가 포함된 센서 제외
-                        final validSensors = _sensors
-                            .where(
-                              (sensor) => !sensor.modelName
-                                  .toLowerCase()
-                                  .contains('error'),
-                            )
-                            .toList();
+                        if (index >= _sensors.length) return Container();
 
-                        if (index >= validSensors.length) return Container();
-
-                        final sensor = validSensors[index];
+                        final sensor = _sensors[index];
                         final sensorId =
                             '${sensor.modelName}_${sensor.portName}';
 
