@@ -118,12 +118,13 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
       print('API URL: $_apiUrl');
       print('서버: $_serverIp:$_serverPort');
 
-      final response = await http
-          .get(
-            Uri.parse(_apiUrl),
-            headers: {'Content-Type': 'application/json'},
-          )
-          .timeout(const Duration(seconds: 10));
+      final response =
+          await http // ← HTTP GET 요청 (비동기)
+              .get(
+                Uri.parse(_apiUrl),
+                headers: {'Content-Type': 'application/json'},
+              )
+              .timeout(const Duration(seconds: 10));
 
       print('HTTP 응답 코드: ${response.statusCode}');
       print('HTTP 응답 헤더: ${response.headers}');
@@ -1277,3 +1278,30 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
     );
   }
 }
+
+
+// 메모
+// - 동기 함수지만 비동기 이벤트(네트워크 응답)에 의해 호출되는 콜백
+// 호출 시점: 비동기 이벤트에 의한 호출
+//   * _onConnect() - 연결 성공시
+//   * _onWsError() - 연결 실패시  
+//   * _onWsDone() - 연결 종료시
+//   * _onStompError() - STOMP 오류시
+
+// 예시
+// void main() {
+//   print("1. 시작");
+  
+//   // 콜백 등록 (언제 실행될지 모름)
+//   StompConfig(
+//     onConnect: _onConnect,  // ← 이벤트 발생시 자동 호출 (콜백등록)
+//   );
+  
+//   _stomp!.activate();  // 연결 시도(연결 시도 시작)
+//   print("2. 연결 시도 완료");
+//   // _onConnect는 언제 실행될까? 모른다!
+// }
+
+// void _onConnect() {
+//   print("3. 연결 성공!"); // ← 네트워크 이벤트 발생시 자동 실행
+// }
