@@ -742,10 +742,10 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
                       fontSize: 16,
                     ),
                   ),
-                  const SizedBox(height: 4),
-                  const Text(
-                    '정상: 0~10 %',
-                    style: TextStyle(color: Colors.white70, fontSize: 12),
+                  const SizedBox(height: 2),
+                  Text(
+                    _getNormalRangeText('LEL', GasThresholds.thresholds['LEL']),
+                    style: const TextStyle(color: Colors.white70, fontSize: 12),
                   ),
                   const SizedBox(height: 20),
 
@@ -1063,7 +1063,16 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
                 fontSize: 16,
               ),
             ),
-            const SizedBox(height: 4),
+            // 정상 범위 표시
+            Text(
+              _getNormalRangeText(gasType, threshold),
+              style: const TextStyle(
+                color: Colors.white70,
+                fontSize: 10,
+                fontWeight: FontWeight.w400,
+              ),
+            ),
+            const SizedBox(height: 20),
             // Gas value
             Text(
               gasValue,
@@ -1074,7 +1083,6 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
               ),
             ),
             const SizedBox(height: 2),
-            // Unit below the value
             Text(
               threshold?['unit'] ?? '',
               style: const TextStyle(
@@ -1087,6 +1095,22 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
         ),
       ),
     );
+  }
+
+  // 정상 범위 텍스트 생성
+  String _getNormalRangeText(String gasType, Map<String, dynamic>? threshold) {
+    if (threshold == null) return '';
+
+    final normalMin = threshold['normal_min'];
+    final normalMax = threshold['normal_max'];
+    final unit = threshold['unit'] ?? '';
+
+    // O2는 특별한 범위 표시
+    if (gasType.toLowerCase() == 'o2') {
+      return '정상: $normalMin~$normalMax $unit';
+    }
+
+    return '정상: $normalMin~$normalMax $unit';
   }
 
   void _manualReconnect() {
