@@ -76,6 +76,11 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
   String _connectionStatus = '센서 정보 로딩중...';
   bool _isWebSocketConnected = false;
 
+  // ---- 개별 센서 구독 상태 추적 ----
+  Map<String, DateTime> _lastDataReceived = {}; // 센서별 마지막 데이터 수신 시간
+  Map<String, bool> _subscriptionActive = {}; // 센서별 구독 활성 상태
+  Timer? _subscriptionHealthChecker; // 구독 상태 체크 타이머
+
   // ---- STOMP ----
   StompClient? _stomp;
   StreamSubscription? _heartbeatTicker;
@@ -95,6 +100,7 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
   void dispose() {
     _heartbeatTicker?.cancel();
     _retryTimer?.cancel();
+    _subscriptionHealthChecker?.cancel();
     _stomp?.deactivate();
     super.dispose();
   }
@@ -267,6 +273,9 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
       _connectionStatus = '${_sensors.length}개 센서 구독 완료';
     });
 
+    // 구독 상태 헬스체크 시작
+    _startSubscriptionHealthCheck();
+
     print('=== 웹소켓 구독 완료 ===\n');
   }
 
@@ -274,6 +283,7 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
     // WebSocket은 연결되었지만 STOMP 프로토콜에서 서버가 ERROR 프레임을 보낼 때
     _isConnecting = false;
     _heartbeatTicker?.cancel();
+    _subscriptionHealthChecker?.cancel(); // 구독 헬스체크 중단
     setState(() {
       _isWebSocketConnected = false;
       _connectionStatus = 'STOMP 오류: ${frame.body ?? frame.headers.toString()}';
@@ -290,6 +300,7 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
 
     debugPrint('WebSocket error: $error');
     _heartbeatTicker?.cancel();
+    _subscriptionHealthChecker?.cancel(); // 구독 헬스체크 중단
     setState(() {
       _isWebSocketConnected = false;
       _connectionStatus = '연결 오류: $error';
@@ -306,11 +317,109 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
 
     debugPrint('WebSocket closed');
     _heartbeatTicker?.cancel();
+    _subscriptionHealthChecker?.cancel(); // 구독 헬스체크 중단
     setState(() {
       _isWebSocketConnected = false;
       _connectionStatus = '연결 끊어짐';
     });
     _scheduleRetry();
+  }
+
+  // ------------------ 개별 센서 구독 관리 ------------------
+
+  // 특정 센서만 재구독 (WebSocket 연결 유지)
+  void _resubscribeSingleSensor(int sensorIndex) {
+    if (sensorIndex >= _sensors.length || !_isWebSocketConnected) return;
+
+    final sensor = _sensors[sensorIndex];
+    final sensorId = '${sensor.modelName}_${sensor.portName}';
+
+    print('개별 센서 재구독 시도: $sensorId (${sensor.displayName})');
+
+    // 해당 센서만 다시 구독
+    _stomp?.subscribe(
+      destination: sensor.topicPath, // ← 이게 구독
+      headers: const {'ack': 'auto'},
+      callback: (msg) {
+        print(
+          '센서 ${sensorIndex + 1} 메시지 수신: ${msg.body?.substring(0, 100)}${(msg.body?.length ?? 0) > 100 ? '...' : ''}',
+        );
+        _updateSensor(sensorIndex, msg.body);
+      },
+    );
+
+    print('개별 센서 재구독 완료: $sensorId');
+  }
+
+  // 실패한 센서들만 재구독
+  void _resubscribeFailedSensors() {
+    if (!_isWebSocketConnected) {
+      print('WebSocket 연결이 없어 개별 재구독 불가');
+      return;
+    }
+
+    final now = DateTime.now();
+    List<int> failedSensorIndexes = [];
+
+    // 30초 이상 데이터 안 온 센서들 찾기
+    for (int i = 0; i < _sensors.length; i++) {
+      final sensor = _sensors[i];
+      final sensorId = '${sensor.modelName}_${sensor.portName}';
+      final lastReceived = _lastDataReceived[sensorId];
+
+      // 30초 이상 데이터 안 오면 구독 문제로 판단
+      if (lastReceived == null || now.difference(lastReceived).inSeconds > 30) {
+        failedSensorIndexes.add(i);
+        _subscriptionActive[sensorId] = false;
+      }
+    }
+
+    if (failedSensorIndexes.isNotEmpty) {
+      print('실패한 센서 ${failedSensorIndexes.length}개 재구독 시작');
+      for (int index in failedSensorIndexes) {
+        _resubscribeSingleSensor(index);
+      }
+
+      setState(() {
+        _connectionStatus = '${failedSensorIndexes.length}개 센서 재구독 시도';
+      });
+    } else {
+      print('모든 센서 구독 정상');
+    }
+  }
+
+  // 구독 상태 체크 시작
+  void _startSubscriptionHealthCheck() {
+    _subscriptionHealthChecker?.cancel();
+    _subscriptionHealthChecker = Timer.periodic(
+      const Duration(seconds: 30), // 30초마다 체크
+      (_) => _checkSubscriptionHealth(),
+    );
+    print('구독 헬스체크 시작 (30초 간격)');
+  }
+
+  // 구독 상태 체크 및 문제 센서 재구독
+  void _checkSubscriptionHealth() {
+    if (!_isWebSocketConnected) return;
+
+    final now = DateTime.now();
+    List<String> problemSensors = [];
+
+    for (final sensor in _sensors) {
+      final sensorId = '${sensor.modelName}_${sensor.portName}';
+      final lastReceived = _lastDataReceived[sensorId];
+
+      // 30초 이상 데이터 안 오면 구독 문제로 판단
+      if (lastReceived == null || now.difference(lastReceived).inSeconds > 30) {
+        problemSensors.add(sensor.displayName);
+        _subscriptionActive[sensorId] = false;
+      }
+    }
+
+    if (problemSensors.isNotEmpty) {
+      print('구독 문제 센서 발견: ${problemSensors.join(', ')}');
+      _resubscribeFailedSensors();
+    }
   }
 
   void _scheduleRetry() {
@@ -331,6 +440,10 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
     final nowStr = DateTime.now().toString().substring(11, 19);
     final sensor = _sensors[sensorIndex];
     final sensorId = '${sensor.modelName}_${sensor.portName}';
+
+    // 센서별 데이터 수신 시간 기록 (개별 구독 상태 추적)
+    _lastDataReceived[sensorId] = DateTime.now();
+    _subscriptionActive[sensorId] = true;
 
     // 원본 데이터 출력
     logMessage('=== 웹소켓 데이터 수신 ===', name: 'WebSocket');
@@ -407,30 +520,30 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
             }
 
             // 각 가스 데이터 업데이트
-            // if (data.containsKey('co')) {
-            //   final oldValue = _sensorGroups[sensorId]!['CO'];
-            //   final newValue = data['co']?.toString() ?? '--';
-            //   _sensorGroups[sensorId]!['CO'] = newValue;
-            //   logMessage('CO 업데이트: $oldValue → $newValue', name: 'GasUpdate');
-            // }
-            // if (data.containsKey('o2')) {
-            //   final oldValue = _sensorGroups[sensorId]!['O2'];
-            //   final newValue = data['o2']?.toString() ?? '--';
-            //   _sensorGroups[sensorId]!['O2'] = newValue;
-            //   logMessage('O2 업데이트: $oldValue → $newValue', name: 'GasUpdate');
-            // }
-            // if (data.containsKey('h2s')) {
-            //   final oldValue = _sensorGroups[sensorId]!['H2S'];
-            //   final newValue = data['h2s']?.toString() ?? '--';
-            //   _sensorGroups[sensorId]!['H2S'] = newValue;
-            //   logMessage('H2S 업데이트: $oldValue → $newValue', name: 'GasUpdate');
-            // }
-            // if (data.containsKey('co2')) {
-            //   final oldValue = _sensorGroups[sensorId]!['CO2'];
-            //   final newValue = data['co2']?.toString() ?? '--';
-            //   _sensorGroups[sensorId]!['CO2'] = newValue;
-            //   logMessage('CO2 업데이트: $oldValue → $newValue', name: 'GasUpdate');
-            // }
+            if (data.containsKey('co')) {
+              final oldValue = _sensorGroups[sensorId]!['CO'];
+              final newValue = data['co']?.toString() ?? '--';
+              _sensorGroups[sensorId]!['CO'] = newValue;
+              logMessage('CO 업데이트: $oldValue → $newValue', name: 'GasUpdate');
+            }
+            if (data.containsKey('o2')) {
+              final oldValue = _sensorGroups[sensorId]!['O2'];
+              final newValue = data['o2']?.toString() ?? '--';
+              _sensorGroups[sensorId]!['O2'] = newValue;
+              logMessage('O2 업데이트: $oldValue → $newValue', name: 'GasUpdate');
+            }
+            if (data.containsKey('h2s')) {
+              final oldValue = _sensorGroups[sensorId]!['H2S'];
+              final newValue = data['h2s']?.toString() ?? '--';
+              _sensorGroups[sensorId]!['H2S'] = newValue;
+              logMessage('H2S 업데이트: $oldValue → $newValue', name: 'GasUpdate');
+            }
+            if (data.containsKey('co2')) {
+              final oldValue = _sensorGroups[sensorId]!['CO2'];
+              final newValue = data['co2']?.toString() ?? '--';
+              _sensorGroups[sensorId]!['CO2'] = newValue;
+              logMessage('CO2 업데이트: $oldValue → $newValue', name: 'GasUpdate');
+            }
           }
 
           // 알람 메시지 처리
