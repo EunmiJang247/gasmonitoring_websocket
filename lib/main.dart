@@ -704,6 +704,24 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
                     fontSize: 18,
                   ),
                 ),
+                const SizedBox(width: 8),
+                // 톱니바퀴 아이콘 (임계치 설정)
+                InkWell(
+                  onTap: () =>
+                      _showThresholdSettingsDialog(context, sensorId, 'lel'),
+                  child: Container(
+                    padding: const EdgeInsets.all(4),
+                    decoration: BoxDecoration(
+                      color: Colors.grey[200],
+                      borderRadius: BorderRadius.circular(4),
+                    ),
+                    child: const Icon(
+                      Icons.settings,
+                      size: 16,
+                      color: Colors.grey,
+                    ),
+                  ),
+                ),
                 const Spacer(),
                 Text(
                   statusText,
@@ -887,6 +905,27 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
                     color: Colors.black,
                     fontWeight: FontWeight.bold,
                     fontSize: 18,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                // 톱니바퀴 아이콘 (임계치 설정)
+                InkWell(
+                  onTap: () => _showThresholdSettingsDialog(
+                    context,
+                    sensorId,
+                    'composite',
+                  ),
+                  child: Container(
+                    padding: const EdgeInsets.all(4),
+                    decoration: BoxDecoration(
+                      color: Colors.grey[200],
+                      borderRadius: BorderRadius.circular(4),
+                    ),
+                    child: const Icon(
+                      Icons.settings,
+                      size: 16,
+                      color: Colors.grey,
+                    ),
                   ),
                 ),
                 const Spacer(),
@@ -1371,6 +1410,518 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
         ],
       ),
     );
+  }
+
+  // 임계치 설정 다이얼로그 표시
+  void _showThresholdSettingsDialog(
+    BuildContext context,
+    String sensorId,
+    String sensorType,
+  ) {
+    showDialog(
+      context: context,
+      builder: (BuildContext context) {
+        return _ThresholdSettingsDialog(
+          sensorId: sensorId,
+          sensorType: sensorType,
+          onThresholdChanged:
+              (String gasType, Map<String, dynamic> newThresholds) {
+                setState(() {
+                  // GasThresholds 업데이트
+                  GasThresholds.thresholds[gasType] = {
+                    ...GasThresholds.thresholds[gasType]!,
+                    ...newThresholds,
+                  };
+                });
+              },
+        );
+      },
+    );
+  }
+}
+
+// 임계치 설정 다이얼로그 위젯
+class _ThresholdSettingsDialog extends StatefulWidget {
+  final String sensorId;
+  final String sensorType;
+  final Function(String gasType, Map<String, dynamic> newThresholds)
+  onThresholdChanged;
+
+  const _ThresholdSettingsDialog({
+    required this.sensorId,
+    required this.sensorType,
+    required this.onThresholdChanged,
+  });
+
+  @override
+  _ThresholdSettingsDialogState createState() =>
+      _ThresholdSettingsDialogState();
+}
+
+class _ThresholdSettingsDialogState extends State<_ThresholdSettingsDialog> {
+  late Map<String, Map<String, TextEditingController>> controllers;
+
+  @override
+  void initState() {
+    super.initState();
+    controllers = {};
+
+    // 센서 타입에 따라 가스 종류 결정
+    List<String> gasTypes = [];
+    if (widget.sensorType == 'composite') {
+      gasTypes = ['CO', 'O2', 'H2S', 'CO2'];
+    } else if (widget.sensorType == 'lel') {
+      gasTypes = ['LEL'];
+    }
+
+    // 각 가스별 컨트롤러 초기화
+    for (String gasType in gasTypes) {
+      final threshold = GasThresholds.thresholds[gasType];
+      if (threshold != null) {
+        if (gasType == 'O2') {
+          // O2는 특별한 구조를 위한 더 많은 필드
+          controllers[gasType] = {
+            'normal_min': TextEditingController(
+              text: threshold['normal_min'].toString(),
+            ),
+            'normal_max': TextEditingController(
+              text: threshold['normal_max'].toString(),
+            ),
+            'warning_min_low': TextEditingController(
+              text: threshold['warning_min_low'].toString(),
+            ),
+            'warning_max_low': TextEditingController(
+              text: threshold['warning_max_low'].toString(),
+            ),
+            'warning_min_high': TextEditingController(
+              text: threshold['warning_min_high'].toString(),
+            ),
+            'warning_max_high': TextEditingController(
+              text: threshold['warning_max_high'].toString(),
+            ),
+            'danger_min': TextEditingController(
+              text: threshold['danger_min'].toString(),
+            ),
+            'danger_max': TextEditingController(
+              text: threshold['danger_max'].toString(),
+            ),
+          };
+        } else {
+          // 다른 가스들은 기본 구조
+          controllers[gasType] = {
+            'normal_max': TextEditingController(
+              text: threshold['normal_max'].toString(),
+            ),
+            'warning_max': TextEditingController(
+              text: threshold['warning_max'].toString(),
+            ),
+            'danger_min': TextEditingController(
+              text: threshold['danger_min'].toString(),
+            ),
+          };
+        }
+      }
+    }
+  }
+
+  @override
+  void dispose() {
+    // 컨트롤러들 정리
+    for (var gasControllers in controllers.values) {
+      for (var controller in gasControllers.values) {
+        controller.dispose();
+      }
+    }
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    List<String> gasTypes = [];
+    if (widget.sensorType == 'composite') {
+      gasTypes = ['CO', 'O2', 'H2S', 'CO2'];
+    } else if (widget.sensorType == 'lel') {
+      gasTypes = ['LEL'];
+    }
+
+    return AlertDialog(
+      title: Text('${widget.sensorId} 임계치 설정'),
+      content: SizedBox(
+        width: 400,
+        height: 500,
+        child: SingleChildScrollView(
+          child: Column(
+            children: gasTypes
+                .map((gasType) => _buildGasThresholdCard(gasType))
+                .toList(),
+          ),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('취소'),
+        ),
+        ElevatedButton(onPressed: _saveThresholds, child: const Text('저장')),
+      ],
+    );
+  }
+
+  Widget _buildGasThresholdCard(String gasType) {
+    final threshold = GasThresholds.thresholds[gasType];
+    final unit = threshold?['unit'] ?? '';
+
+    return Card(
+      margin: const EdgeInsets.only(bottom: 16),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              '$gasType ($unit)',
+              style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 12),
+
+            // O2는 특별한 설정 UI
+            if (gasType == 'O2') ...[
+              const Text(
+                '정상 범위',
+                style: TextStyle(
+                  fontWeight: FontWeight.bold,
+                  color: Colors.green,
+                ),
+              ),
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  Expanded(
+                    child: TextField(
+                      controller: controllers[gasType]?['normal_min'],
+                      decoration: const InputDecoration(
+                        labelText: '정상 최소값',
+                        border: OutlineInputBorder(),
+                      ),
+                      keyboardType: TextInputType.number,
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: TextField(
+                      controller: controllers[gasType]?['normal_max'],
+                      decoration: const InputDecoration(
+                        labelText: '정상 최대값',
+                        border: OutlineInputBorder(),
+                      ),
+                      keyboardType: TextInputType.number,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 16),
+
+              const Text(
+                '경고 범위 (낮은 쪽)',
+                style: TextStyle(
+                  fontWeight: FontWeight.bold,
+                  color: Colors.orange,
+                ),
+              ),
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  Expanded(
+                    child: TextField(
+                      controller: controllers[gasType]?['warning_min_low'],
+                      decoration: const InputDecoration(
+                        labelText: '경고 최소값 (하한)',
+                        border: OutlineInputBorder(),
+                      ),
+                      keyboardType: TextInputType.number,
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: TextField(
+                      controller: controllers[gasType]?['warning_max_low'],
+                      decoration: const InputDecoration(
+                        labelText: '경고 최대값 (하한)',
+                        border: OutlineInputBorder(),
+                      ),
+                      keyboardType: TextInputType.number,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 16),
+
+              const Text(
+                '경고 범위 (높은 쪽)',
+                style: TextStyle(
+                  fontWeight: FontWeight.bold,
+                  color: Colors.orange,
+                ),
+              ),
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  Expanded(
+                    child: TextField(
+                      controller: controllers[gasType]?['warning_min_high'],
+                      decoration: const InputDecoration(
+                        labelText: '경고 최소값 (상한)',
+                        border: OutlineInputBorder(),
+                      ),
+                      keyboardType: TextInputType.number,
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: TextField(
+                      controller: controllers[gasType]?['warning_max_high'],
+                      decoration: const InputDecoration(
+                        labelText: '경고 최대값 (상한)',
+                        border: OutlineInputBorder(),
+                      ),
+                      keyboardType: TextInputType.number,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 16),
+
+              const Text(
+                '위험 범위',
+                style: TextStyle(
+                  fontWeight: FontWeight.bold,
+                  color: Colors.red,
+                ),
+              ),
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  Expanded(
+                    child: TextField(
+                      controller: controllers[gasType]?['danger_min'],
+                      decoration: const InputDecoration(
+                        labelText: '위험 최소값',
+                        border: OutlineInputBorder(),
+                      ),
+                      keyboardType: TextInputType.number,
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: TextField(
+                      controller: controllers[gasType]?['danger_max'],
+                      decoration: const InputDecoration(
+                        labelText: '위험 최대값',
+                        border: OutlineInputBorder(),
+                      ),
+                      keyboardType: TextInputType.number,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+
+              // O2 범위 미리보기
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: Colors.grey[100],
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      '위험: ~${controllers[gasType]?['danger_min']?.text ?? '--'} $unit 또는 ${controllers[gasType]?['danger_max']?.text ?? '--'}+ $unit',
+                      style: TextStyle(color: Colors.red[700], fontSize: 12),
+                    ),
+                    Text(
+                      '경고: ${controllers[gasType]?['warning_min_low']?.text ?? '--'}~${controllers[gasType]?['warning_max_low']?.text ?? '--'} $unit 또는 ${controllers[gasType]?['warning_min_high']?.text ?? '--'}~${controllers[gasType]?['warning_max_high']?.text ?? '--'} $unit',
+                      style: TextStyle(color: Colors.orange[700], fontSize: 12),
+                    ),
+                    Text(
+                      '정상: ${controllers[gasType]?['normal_min']?.text ?? '--'}~${controllers[gasType]?['normal_max']?.text ?? '--'} $unit',
+                      style: TextStyle(color: Colors.green[700], fontSize: 12),
+                    ),
+                  ],
+                ),
+              ),
+            ] else ...[
+              // 다른 가스들은 기존 UI
+              Row(
+                children: [
+                  Expanded(
+                    child: TextField(
+                      controller: controllers[gasType]?['normal_max'],
+                      decoration: const InputDecoration(
+                        labelText: '정상 최대값',
+                        border: OutlineInputBorder(),
+                      ),
+                      keyboardType: TextInputType.number,
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: TextField(
+                      controller: controllers[gasType]?['warning_max'],
+                      decoration: const InputDecoration(
+                        labelText: '경고 최대값',
+                        border: OutlineInputBorder(),
+                      ),
+                      keyboardType: TextInputType.number,
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: TextField(
+                      controller: controllers[gasType]?['danger_min'],
+                      decoration: const InputDecoration(
+                        labelText: '위험 최소값',
+                        border: OutlineInputBorder(),
+                      ),
+                      keyboardType: TextInputType.number,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              // 다른 가스들의 범위 미리보기
+              Text(
+                '정상: 0~${controllers[gasType]?['normal_max']?.text ?? '--'} $unit',
+                style: TextStyle(color: Colors.green[700], fontSize: 12),
+              ),
+              Text(
+                '경고: ${controllers[gasType]?['normal_max']?.text ?? '--'}~${controllers[gasType]?['warning_max']?.text ?? '--'} $unit',
+                style: TextStyle(color: Colors.orange[700], fontSize: 12),
+              ),
+              Text(
+                '위험: ${controllers[gasType]?['danger_min']?.text ?? '--'}+ $unit',
+                style: TextStyle(color: Colors.red[700], fontSize: 12),
+              ),
+            ],
+            const SizedBox(height: 8),
+            Text(
+              '정상: 0~${controllers[gasType]?['normal_max']?.text ?? '--'} $unit',
+              style: TextStyle(color: Colors.green[700], fontSize: 12),
+            ),
+            Text(
+              '경고: ${controllers[gasType]?['normal_max']?.text ?? '--'}~${controllers[gasType]?['warning_max']?.text ?? '--'} $unit',
+              style: TextStyle(color: Colors.orange[700], fontSize: 12),
+            ),
+            Text(
+              '위험: ${controllers[gasType]?['danger_min']?.text ?? '--'}+ $unit',
+              style: TextStyle(color: Colors.red[700], fontSize: 12),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _saveThresholds() {
+    for (String gasType in controllers.keys) {
+      final gasControllers = controllers[gasType]!;
+
+      try {
+        if (gasType == 'O2') {
+          // O2 특별 처리
+          final normalMin = double.parse(gasControllers['normal_min']!.text);
+          final normalMax = double.parse(gasControllers['normal_max']!.text);
+          final warningMinLow = double.parse(
+            gasControllers['warning_min_low']!.text,
+          );
+          final warningMaxLow = double.parse(
+            gasControllers['warning_max_low']!.text,
+          );
+          final warningMinHigh = double.parse(
+            gasControllers['warning_min_high']!.text,
+          );
+          final warningMaxHigh = double.parse(
+            gasControllers['warning_max_high']!.text,
+          );
+          final dangerMin = double.parse(gasControllers['danger_min']!.text);
+          final dangerMax = double.parse(gasControllers['danger_max']!.text);
+
+          // O2 유효성 검증
+          if (normalMin >= normalMax ||
+              warningMinLow >= warningMaxLow ||
+              warningMinHigh >= warningMaxHigh ||
+              dangerMin >= dangerMax ||
+              warningMaxLow > normalMin ||
+              normalMax > warningMinHigh ||
+              warningMaxHigh > dangerMax ||
+              dangerMin > warningMinLow) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text(
+                  '$gasType: 올바른 범위 순서로 설정해주세요\n위험(하한) < 경고(하한) < 정상 < 경고(상한) < 위험(상한)',
+                ),
+                backgroundColor: Colors.red,
+              ),
+            );
+            return;
+          }
+
+          // O2 임계치 업데이트
+          widget.onThresholdChanged(gasType, {
+            'normal_min': normalMin,
+            'normal_max': normalMax,
+            'warning_min_low': warningMinLow,
+            'warning_max_low': warningMaxLow,
+            'warning_min_high': warningMinHigh,
+            'warning_max_high': warningMaxHigh,
+            'danger_min': dangerMin,
+            'danger_max': dangerMax,
+          });
+        } else {
+          // 다른 가스들 기본 처리
+          final normalMax = double.parse(gasControllers['normal_max']!.text);
+          final warningMax = double.parse(gasControllers['warning_max']!.text);
+          final dangerMin = double.parse(gasControllers['danger_min']!.text);
+
+          // 유효성 검증 (경고 최대값과 위험 최소값은 같아도 됨)
+          if (normalMax >= warningMax || warningMax > dangerMin) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text('$gasType: 정상 < 경고 ≤ 위험 순서로 설정해주세요'),
+                backgroundColor: Colors.red,
+              ),
+            );
+            return;
+          }
+
+          // 임계치 업데이트
+          widget.onThresholdChanged(gasType, {
+            'normal_max': normalMax,
+            'warning_min': normalMax,
+            'warning_max': warningMax,
+            'danger_min': dangerMin,
+          });
+        }
+      } catch (e) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('$gasType: 올바른 숫자를 입력해주세요'),
+            backgroundColor: Colors.red,
+          ),
+        );
+        return;
+      }
+    }
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('임계치가 성공적으로 저장되었습니다'),
+        backgroundColor: Colors.green,
+      ),
+    );
+
+    Navigator.of(context).pop();
   }
 }
 

@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 
 // 가스 타입별 임계값 설정
 class GasThresholds {
-  static const Map<String, Map<String, dynamic>> thresholds = {
+  static Map<String, Map<String, dynamic>> thresholds = {
     'CO': {
       'normal_min': 0,
       'normal_max': 30,
