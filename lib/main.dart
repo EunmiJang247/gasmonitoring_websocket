@@ -81,6 +81,10 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
   Map<String, bool> _subscriptionActive = {}; // 센서별 구독 활성 상태
   Timer? _subscriptionHealthChecker; // 구독 상태 체크 타이머
 
+  // ---- 센서별 개별 임계치 ----
+  Map<String, Map<String, Map<String, dynamic>>> _sensorThresholds =
+      {}; // sensorId -> gasType -> thresholds
+
   // ---- STOMP ----
   StompClient? _stomp;
   StreamSubscription? _heartbeatTicker;
@@ -600,16 +604,17 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
 
   // ------------------ 전체 센서 상태 확인 ------------------
 
-  // 전체 센서 중 위험 상태가 있는지 확인
+  // 전체 센서 중 위험 상태가 있는지 확인 (센서별 개별 임계치 사용)
   bool _hasAnySensorInDanger() {
     // 복합가스센서들 확인
     for (final entry in _sensorGroups.entries) {
+      final sensorId = entry.key;
       final gasData = entry.value;
       for (final gasEntry in gasData.entries) {
         final gasType = gasEntry.key;
         final gasValue = gasEntry.value;
         if (gasValue != '--' && gasValue.isNotEmpty) {
-          final status = _calculateGasStatus(gasType, gasValue);
+          final status = _calculateSensorGasStatus(sensorId, gasType, gasValue);
           if (status == SensorStatus.danger) {
             return true;
           }
@@ -617,14 +622,14 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
       }
     }
 
-    // LEL센서들 확인
+    // LEL센서들 확인 (센서별 개별 임계치 사용)
     for (final entry in _lelSensors.entries) {
+      final sensorId = entry.key;
       final lelData = entry.value;
       final lelValue = lelData['lel'] ?? '--';
       if (lelValue != '--' && lelValue.isNotEmpty) {
-        final numValue = double.tryParse(lelValue);
-        if (numValue != null && numValue > 25) {
-          // LEL 위험 범위: 25% 초과
+        final status = _calculateSensorGasStatus(sensorId, 'LEL', lelValue);
+        if (status == SensorStatus.danger) {
           return true;
         }
       }
@@ -640,28 +645,30 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
         {'lel': '--', 'temperature': '--', 'humidity': '--', 'gasId': '--'};
     final alarmMessage = _sensorGroupAlarms[sensorId] ?? '';
 
-    // LEL 값으로 상태 계산 (새로운 범위 적용)
+    // LEL 값으로 상태 계산 (센서별 개별 임계치 사용)
     final lelValue = lelData['lel'] ?? '--';
-    Color statusColor = Colors.green;
-    String statusText = '정상';
+    final status = _calculateSensorGasStatus(sensorId, 'LEL', lelValue);
 
-    if (lelValue != '--' && lelValue.isNotEmpty) {
-      final numValue = double.tryParse(lelValue);
-      if (numValue != null) {
-        if (numValue > 25) {
-          // 위험 범위: 25% 초과
-          statusColor = Colors.red;
-          statusText = '위험';
-        } else if (numValue > 10) {
-          // 경고 범위: 10~25%
-          statusColor = Colors.orange;
-          statusText = '경고';
-        } else {
-          // 정상 범위: 0~10%
-          statusColor = Colors.green;
-          statusText = '정상';
-        }
-      }
+    Color statusColor;
+    String statusText;
+
+    switch (status) {
+      case SensorStatus.normal:
+        statusColor = Colors.green;
+        statusText = '정상';
+        break;
+      case SensorStatus.warning:
+        statusColor = Colors.orange;
+        statusText = '경고';
+        break;
+      case SensorStatus.danger:
+        statusColor = Colors.red;
+        statusText = '위험';
+        break;
+      case SensorStatus.error:
+        statusColor = Colors.grey;
+        statusText = '오류';
+        break;
     }
 
     return Container(
@@ -762,7 +769,10 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
                   ),
                   const SizedBox(height: 2),
                   Text(
-                    _getNormalRangeText('LEL', GasThresholds.thresholds['LEL']),
+                    _getNormalRangeText(
+                      'LEL',
+                      _getSensorThreshold(sensorId, 'LEL'),
+                    ),
                     style: const TextStyle(color: Colors.white70, fontSize: 12),
                   ),
                   const SizedBox(height: 20),
@@ -845,13 +855,13 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
     logMessage('가스데이터: $gasData', name: 'UI');
     logMessage('전체 센서그룹: ${_sensorGroups.keys.toList()}', name: 'UI');
 
-    // 전체 센서 그룹의 상태 계산
+    // 전체 센서 그룹의 상태 계산 (센서별 개별 임계치 사용)
     bool hasError = false;
     bool hasWarning = false;
     for (String gasType in ['CO', 'O2', 'H2S', 'CO2']) {
       final gasValue = gasData[gasType] ?? '--';
       if (gasValue != '--' && gasValue.isNotEmpty) {
-        final status = _calculateGasStatus(gasType, gasValue);
+        final status = _calculateSensorGasStatus(sensorId, gasType, gasValue);
         if (status == SensorStatus.danger) {
           hasError = true;
           break;
@@ -948,10 +958,10 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
               mainAxisSpacing: 12,
               childAspectRatio: 0.6,
               children: [
-                _buildGasCard('CO', gasData['CO'] ?? '--'),
-                _buildGasCard('O2', gasData['O2'] ?? '--'),
-                _buildGasCard('H2S', gasData['H2S'] ?? '--'),
-                _buildGasCard('CO2', gasData['CO2'] ?? '--'),
+                _buildGasCard(sensorId, 'CO', gasData['CO'] ?? '--'),
+                _buildGasCard(sensorId, 'O2', gasData['O2'] ?? '--'),
+                _buildGasCard(sensorId, 'H2S', gasData['H2S'] ?? '--'),
+                _buildGasCard(sensorId, 'CO2', gasData['CO2'] ?? '--'),
               ],
             ),
           ),
@@ -1044,9 +1054,9 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
     return SensorStatus.warning;
   }
 
-  Widget _buildGasCard(String gasType, String gasValue) {
-    final threshold = GasThresholds.thresholds[gasType];
-    final status = _calculateGasStatus(gasType, gasValue);
+  Widget _buildGasCard(String sensorId, String gasType, String gasValue) {
+    final threshold = _getSensorThreshold(sensorId, gasType);
+    final status = _calculateSensorGasStatus(sensorId, gasType, gasValue);
 
     Color cardColor;
     switch (status) {
@@ -1144,6 +1154,11 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
     final normalMax = threshold['normal_max'];
     final unit = threshold['unit'] ?? '';
 
+    // null 값 체크
+    if (normalMin == null || normalMax == null) {
+      return '정상: 설정 필요 $unit';
+    }
+
     // O2는 특별한 범위 표시
     if (gasType.toLowerCase() == 'o2') {
       return '정상: $normalMin~$normalMax $unit';
@@ -1168,6 +1183,102 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
 
   void _reloadSensors() async {
     await _loadSensors();
+  }
+
+  // 센서별 개별 임계치 가져오기 (없으면 글로벌 임계치 사용)
+  Map<String, dynamic>? _getSensorThreshold(String sensorId, String gasType) {
+    final sensorThreshold = _sensorThresholds[sensorId]?[gasType];
+    final globalThreshold = GasThresholds.thresholds[gasType];
+
+    print(
+      '센서 $sensorId의 $gasType 임계치 로드: ${sensorThreshold != null ? '개별' : '글로벌'}',
+    );
+
+    final resultThreshold = sensorThreshold ?? globalThreshold;
+    print('임계치 값: $resultThreshold');
+
+    return resultThreshold;
+  }
+
+  // 센서별 임계치 설정
+  void _setSensorThreshold(
+    String sensorId,
+    String gasType,
+    Map<String, dynamic> threshold,
+  ) {
+    if (_sensorThresholds[sensorId] == null) {
+      _sensorThresholds[sensorId] = {};
+    }
+    _sensorThresholds[sensorId]![gasType] = threshold;
+    print('센서 $sensorId의 $gasType 임계치 저장 완료: $threshold');
+  }
+
+  // 센서별 가스 상태 계산 (개별 임계치 사용)
+  SensorStatus _calculateSensorGasStatus(
+    String sensorId,
+    String gasType,
+    String gasValue,
+  ) {
+    final threshold = _getSensorThreshold(sensorId, gasType);
+    if (gasValue == '--' || gasValue.isEmpty || threshold == null) {
+      return SensorStatus.error;
+    }
+
+    final numValue = double.tryParse(gasValue);
+    if (numValue == null) return SensorStatus.error;
+
+    final normalMin = threshold['normal_min'] as num?;
+    final normalMax = threshold['normal_max'] as num?;
+
+    if (normalMin == null || normalMax == null) {
+      return SensorStatus.error;
+    }
+
+    // 정상 범위 확인
+    if (numValue >= normalMin && numValue <= normalMax) {
+      return SensorStatus.normal;
+    }
+
+    // O2는 특별한 처리 필요 (위/아래 둘 다 경고/위험 범위)
+    if (gasType.toLowerCase() == 'o2') {
+      final warningMaxHigh = threshold['warning_max_high'] as num?;
+      final dangerMin = threshold['danger_min'] as num?;
+      final dangerMax = threshold['danger_max'] as num?;
+
+      if (warningMaxHigh != null && dangerMax != null && dangerMin != null) {
+        // 위험 범위: dangerMax 초과 또는 dangerMin 미만
+        if (numValue > dangerMax || numValue < dangerMin) {
+          return SensorStatus.danger;
+        }
+        // 경고 범위: normalMax~dangerMax 또는 dangerMin~normalMin
+        if ((numValue > normalMax && numValue <= warningMaxHigh) ||
+            (numValue >= dangerMin && numValue < normalMin)) {
+          return SensorStatus.warning;
+        }
+      }
+      return SensorStatus.normal;
+    }
+
+    // 다른 가스들 (CO, H2S, CO2, LEL)
+    final warningMin = threshold['warning_min'] as num?;
+    final warningMax = threshold['warning_max'] as num?;
+    final dangerMin = threshold['danger_min'] as num?;
+
+    // 위험 범위 확인
+    if (dangerMin != null && numValue > dangerMin) {
+      return SensorStatus.danger;
+    }
+
+    // 경고 범위 확인
+    if (warningMin != null &&
+        warningMax != null &&
+        numValue > warningMin &&
+        numValue <= warningMax) {
+      return SensorStatus.warning;
+    }
+
+    // 정상 범위를 벗어났지만 경고/위험에 해당하지 않는 경우
+    return SensorStatus.warning;
   }
 
   void _openSettings() async {
@@ -1424,14 +1535,14 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
         return _ThresholdSettingsDialog(
           sensorId: sensorId,
           sensorType: sensorType,
+          getSensorThreshold: (String gasType) =>
+              _getSensorThreshold(sensorId, gasType),
           onThresholdChanged:
               (String gasType, Map<String, dynamic> newThresholds) {
                 setState(() {
-                  // GasThresholds 업데이트
-                  GasThresholds.thresholds[gasType] = {
-                    ...GasThresholds.thresholds[gasType]!,
-                    ...newThresholds,
-                  };
+                  // 센서별 개별 임계치 저장 (글로벌이 아닌 센서별로)
+                  _setSensorThreshold(sensorId, gasType, newThresholds);
+                  print('센서 $sensorId의 $gasType 임계치 설정: $newThresholds');
                 });
               },
         );
@@ -1444,12 +1555,14 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
 class _ThresholdSettingsDialog extends StatefulWidget {
   final String sensorId;
   final String sensorType;
+  final Function(String gasType) getSensorThreshold;
   final Function(String gasType, Map<String, dynamic> newThresholds)
   onThresholdChanged;
 
   const _ThresholdSettingsDialog({
     required this.sensorId,
     required this.sensorType,
+    required this.getSensorThreshold,
     required this.onThresholdChanged,
   });
 
@@ -1474,49 +1587,52 @@ class _ThresholdSettingsDialogState extends State<_ThresholdSettingsDialog> {
       gasTypes = ['LEL'];
     }
 
-    // 각 가스별 컨트롤러 초기화
+    // 각 가스별 컨트롤러 초기화 (센서별 개별 임계치 사용)
     for (String gasType in gasTypes) {
-      final threshold = GasThresholds.thresholds[gasType];
+      final threshold = widget.getSensorThreshold(gasType);
       if (threshold != null) {
         if (gasType == 'O2') {
           // O2는 특별한 구조를 위한 더 많은 필드
           controllers[gasType] = {
             'normal_min': TextEditingController(
-              text: threshold['normal_min'].toString(),
+              text: (threshold['normal_min'] ?? 0).toString(),
             ),
             'normal_max': TextEditingController(
-              text: threshold['normal_max'].toString(),
+              text: (threshold['normal_max'] ?? 0).toString(),
             ),
             'warning_min_low': TextEditingController(
-              text: threshold['warning_min_low'].toString(),
+              text: (threshold['warning_min_low'] ?? 0).toString(),
             ),
             'warning_max_low': TextEditingController(
-              text: threshold['warning_max_low'].toString(),
+              text: (threshold['warning_max_low'] ?? 0).toString(),
             ),
             'warning_min_high': TextEditingController(
-              text: threshold['warning_min_high'].toString(),
+              text: (threshold['warning_min_high'] ?? 0).toString(),
             ),
             'warning_max_high': TextEditingController(
-              text: threshold['warning_max_high'].toString(),
+              text: (threshold['warning_max_high'] ?? 0).toString(),
             ),
             'danger_min': TextEditingController(
-              text: threshold['danger_min'].toString(),
+              text: (threshold['danger_min'] ?? 0).toString(),
             ),
             'danger_max': TextEditingController(
-              text: threshold['danger_max'].toString(),
+              text: (threshold['danger_max'] ?? 0).toString(),
             ),
           };
         } else {
           // 다른 가스들은 기본 구조
           controllers[gasType] = {
+            'normal_min': TextEditingController(
+              text: (threshold['normal_min'] ?? 0).toString(),
+            ),
             'normal_max': TextEditingController(
-              text: threshold['normal_max'].toString(),
+              text: (threshold['normal_max'] ?? 0).toString(),
             ),
             'warning_max': TextEditingController(
-              text: threshold['warning_max'].toString(),
+              text: (threshold['warning_max'] ?? 0).toString(),
             ),
             'danger_min': TextEditingController(
-              text: threshold['danger_min'].toString(),
+              text: (threshold['danger_min'] ?? 0).toString(),
             ),
           };
         }
@@ -1753,8 +1869,27 @@ class _ThresholdSettingsDialogState extends State<_ThresholdSettingsDialog> {
               ),
             ] else ...[
               // 다른 가스들은 기존 UI
+              const Text(
+                '정상 범위',
+                style: TextStyle(
+                  fontWeight: FontWeight.bold,
+                  color: Colors.green,
+                ),
+              ),
+              const SizedBox(height: 8),
               Row(
                 children: [
+                  Expanded(
+                    child: TextField(
+                      controller: controllers[gasType]?['normal_min'],
+                      decoration: const InputDecoration(
+                        labelText: '정상 최소값',
+                        border: OutlineInputBorder(),
+                      ),
+                      keyboardType: TextInputType.number,
+                    ),
+                  ),
+                  const SizedBox(width: 8),
                   Expanded(
                     child: TextField(
                       controller: controllers[gasType]?['normal_max'],
@@ -1765,7 +1900,20 @@ class _ThresholdSettingsDialogState extends State<_ThresholdSettingsDialog> {
                       keyboardType: TextInputType.number,
                     ),
                   ),
-                  const SizedBox(width: 8),
+                ],
+              ),
+              const SizedBox(height: 16),
+
+              const Text(
+                '경고/위험 범위',
+                style: TextStyle(
+                  fontWeight: FontWeight.bold,
+                  color: Colors.orange,
+                ),
+              ),
+              const SizedBox(height: 8),
+              Row(
+                children: [
                   Expanded(
                     child: TextField(
                       controller: controllers[gasType]?['warning_max'],
@@ -1791,32 +1939,31 @@ class _ThresholdSettingsDialogState extends State<_ThresholdSettingsDialog> {
               ),
               const SizedBox(height: 8),
               // 다른 가스들의 범위 미리보기
-              Text(
-                '정상: 0~${controllers[gasType]?['normal_max']?.text ?? '--'} $unit',
-                style: TextStyle(color: Colors.green[700], fontSize: 12),
-              ),
-              Text(
-                '경고: ${controllers[gasType]?['normal_max']?.text ?? '--'}~${controllers[gasType]?['warning_max']?.text ?? '--'} $unit',
-                style: TextStyle(color: Colors.orange[700], fontSize: 12),
-              ),
-              Text(
-                '위험: ${controllers[gasType]?['danger_min']?.text ?? '--'}+ $unit',
-                style: TextStyle(color: Colors.red[700], fontSize: 12),
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: Colors.grey[100],
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      '정상: ${controllers[gasType]?['normal_min']?.text ?? '--'}~${controllers[gasType]?['normal_max']?.text ?? '--'} $unit',
+                      style: TextStyle(color: Colors.green[700], fontSize: 12),
+                    ),
+                    Text(
+                      '경고: ${controllers[gasType]?['normal_max']?.text ?? '--'}~${controllers[gasType]?['warning_max']?.text ?? '--'} $unit',
+                      style: TextStyle(color: Colors.orange[700], fontSize: 12),
+                    ),
+                    Text(
+                      '위험: ${controllers[gasType]?['danger_min']?.text ?? '--'}+ $unit',
+                      style: TextStyle(color: Colors.red[700], fontSize: 12),
+                    ),
+                  ],
+                ),
               ),
             ],
-            const SizedBox(height: 8),
-            Text(
-              '정상: 0~${controllers[gasType]?['normal_max']?.text ?? '--'} $unit',
-              style: TextStyle(color: Colors.green[700], fontSize: 12),
-            ),
-            Text(
-              '경고: ${controllers[gasType]?['normal_max']?.text ?? '--'}~${controllers[gasType]?['warning_max']?.text ?? '--'} $unit',
-              style: TextStyle(color: Colors.orange[700], fontSize: 12),
-            ),
-            Text(
-              '위험: ${controllers[gasType]?['danger_min']?.text ?? '--'}+ $unit',
-              style: TextStyle(color: Colors.red[700], fontSize: 12),
-            ),
           ],
         ),
       ),
@@ -1867,7 +2014,8 @@ class _ThresholdSettingsDialogState extends State<_ThresholdSettingsDialog> {
             return;
           }
 
-          // O2 임계치 업데이트
+          // O2 임계치 업데이트 (unit도 포함)
+          final originalThreshold = GasThresholds.thresholds[gasType];
           widget.onThresholdChanged(gasType, {
             'normal_min': normalMin,
             'normal_max': normalMax,
@@ -1877,30 +2025,37 @@ class _ThresholdSettingsDialogState extends State<_ThresholdSettingsDialog> {
             'warning_max_high': warningMaxHigh,
             'danger_min': dangerMin,
             'danger_max': dangerMax,
+            'unit': originalThreshold?['unit'] ?? '',
           });
         } else {
           // 다른 가스들 기본 처리
+          final normalMin = double.parse(gasControllers['normal_min']!.text);
           final normalMax = double.parse(gasControllers['normal_max']!.text);
           final warningMax = double.parse(gasControllers['warning_max']!.text);
           final dangerMin = double.parse(gasControllers['danger_min']!.text);
 
-          // 유효성 검증 (경고 최대값과 위험 최소값은 같아도 됨)
-          if (normalMax >= warningMax || warningMax > dangerMin) {
+          // 유효성 검증
+          if (normalMin >= normalMax ||
+              normalMax >= warningMax ||
+              warningMax > dangerMin) {
             ScaffoldMessenger.of(context).showSnackBar(
               SnackBar(
-                content: Text('$gasType: 정상 < 경고 ≤ 위험 순서로 설정해주세요'),
+                content: Text('$gasType: 정상최소 < 정상최대 < 경고최대 ≤ 위험최소 순서로 설정해주세요'),
                 backgroundColor: Colors.red,
               ),
             );
             return;
           }
 
-          // 임계치 업데이트
+          // 임계치 업데이트 (unit도 포함)
+          final originalThreshold = GasThresholds.thresholds[gasType];
           widget.onThresholdChanged(gasType, {
+            'normal_min': normalMin,
             'normal_max': normalMax,
             'warning_min': normalMax,
             'warning_max': warningMax,
             'danger_min': dangerMin,
+            'unit': originalThreshold?['unit'] ?? '',
           });
         }
       } catch (e) {
