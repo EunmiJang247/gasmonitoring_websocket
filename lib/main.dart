@@ -81,6 +81,7 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
   Map<String, DateTime> _lastDataReceived = {}; // 센서별 마지막 데이터 수신 시간
   Map<String, bool> _subscriptionActive = {}; // 센서별 구독 활성 상태
   Timer? _subscriptionHealthChecker; // 구독 상태 체크 타이머
+  bool _isSchedulingRetry = false;
 
   // ---- 센서별 개별 임계치 ----
   Map<String, Map<String, Map<String, dynamic>>> _sensorThresholds =
@@ -305,6 +306,7 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
   }
 
   void _onStompError(StompFrame frame) {
+    _isWebSocketConnecting = false;
     // WebSocket은 연결되었지만 STOMP 프로토콜에서 서버가 ERROR 프레임을 보낼 때
     _isConnecting = false;
     _heartbeatTicker?.cancel();
@@ -323,6 +325,8 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
     // 4. WebSocket 핸드셰이크 실패 → _onWsError 발생
     // 5. 연결 중간에 끊어짐 → _onWsError 발생
 
+    _isWebSocketConnecting = false;
+    _isConnecting = false;
     debugPrint('WebSocket error: $error');
     _heartbeatTicker?.cancel();
     _subscriptionHealthChecker?.cancel(); // 구독 헬스체크 중단
@@ -340,6 +344,8 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
     // 3. 프로토콜에 따른 정상 종료
     // 4. 타임아웃으로 인한 정상 종료
 
+    _isWebSocketConnecting = false;
+    _isConnecting = false;
     debugPrint('WebSocket closed');
     _heartbeatTicker?.cancel();
     _subscriptionHealthChecker?.cancel(); // 구독 헬스체크 중단
@@ -533,6 +539,12 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
   }
 
   void _scheduleRetry() {
+    if (_isWebSocketConnecting || _isConnecting || _isSchedulingRetry) {
+      print('이미 연결/재시도 중 - 중복 방지');
+      return;
+    }
+
+    _isSchedulingRetry = true;
     // WebSocket 연결을 다시 하는 것(구독까지 포함된 전체 연결을 다시 시도)
     _retryTimer?.cancel();
     _retryTimer = Timer(const Duration(seconds: 3), () {
