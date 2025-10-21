@@ -43,7 +43,13 @@ class MyApp extends StatelessWidget {
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(seedColor: Colors.blue),
         useMaterial3: true,
+        // 로컬 폰트 사용 (외부 Google Fonts 방지)
+        fontFamily: 'NotoSansKR',
+        // 텍스트 테마도 로컬 폰트로 설정
+        textTheme: const TextTheme().apply(fontFamily: 'NotoSansKR'),
       ),
+      // 디버그 배너 제거
+      debugShowCheckedModeBanner: false,
       home: const GasMonitoringPage(),
     );
   }
@@ -1067,16 +1073,16 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
             ),
           ),
 
-          // 가스 카드들 그리드
+          // 가스 카드들 그리드 (2x2 레이아웃으로 변경)
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16),
             child: GridView.count(
               shrinkWrap: true,
               physics: const NeverScrollableScrollPhysics(),
-              crossAxisCount: 4,
+              crossAxisCount: 2, // 4에서 2로 변경 (한 줄에 2개)
               crossAxisSpacing: 12,
               mainAxisSpacing: 12,
-              childAspectRatio: 0.6,
+              childAspectRatio: 0.8, // 비율도 조정 (0.6에서 0.8로)
               children: [
                 _buildGasCard(sensorId, 'CO', gasData['CO'] ?? '--'),
                 _buildGasCard(sensorId, 'O2', gasData['O2'] ?? '--'),
@@ -1588,7 +1594,14 @@ class _GasMonitoringPageState extends State<GasMonitoringPage> {
                   )
                 : Padding(
                     padding: const EdgeInsets.symmetric(horizontal: 16),
-                    child: ListView.builder(
+                    child: GridView.builder(
+                      gridDelegate:
+                          const SliverGridDelegateWithFixedCrossAxisCount(
+                            crossAxisCount: 2, // 한 줄에 2개 카드
+                            crossAxisSpacing: 16, // 카드 간 좌우 간격
+                            mainAxisSpacing: 16, // 카드 간 상하 간격
+                            childAspectRatio: 0.8, // 카드 비율 (세로가 더 길게)
+                          ),
                       itemCount: _sensors.length,
                       itemBuilder: (context, index) {
                         if (index >= _sensors.length) return Container();
